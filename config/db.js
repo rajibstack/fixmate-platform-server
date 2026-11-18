@@ -1,37 +1,16 @@
-const { MongoClient, ServerApiVersion } = require("mongodb");
+const mongoose = require("mongoose");
 require("dotenv").config();
 
-const uri = process.env.MONGODB_URI;
-
-const client = new MongoClient(uri, {
-  serverApi: {
-    version: ServerApiVersion.v1,
-    strict: true,
-    deprecationErrors: true,
-  },
-});
-
-let db;
-
-async function connectDB() {
-  if (!db) {
-    await client.connect();
-    db = client.db(process.env.DB_NAME || "fixmateDB");
-    console.log("Connected to MongoDB successfully!");
+const connectDB = async () => {
+  try {
+    await mongoose.connect(process.env.MONGODB_URI, {
+      dbName: process.env.DB_NAME || "fixmateDB",
+    });
+    console.log("Connected to MongoDB via Mongoose successfully!");
+  } catch (error) {
+    console.error("MongoDB connection error:", error);
+    process.exit(1);
   }
-  return db;
-}
+};
 
-function getCollections() {
-  if (!db) {
-    throw new Error("Database not initialized. Call connectDB first.");
-  }
-  return {
-    usersCollection: db.collection("user"),
-    servicesCollection: db.collection("services"),
-    bookingsCollection: db.collection("bookings"),
-    paymentsCollection: db.collection("payments"),
-  };
-}
-
-module.exports = { connectDB, getCollections, client };
+module.exports = { connectDB };
