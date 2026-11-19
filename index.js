@@ -733,6 +733,124 @@ app.post("/api/bookings", verifyToken, async (req, res) => {
   }
 });
 
+// Customer: Get own bookings
+app.get("/api/bookings/my", verifyToken, async (req, res) => {
+  try {
+    const bookings = await Booking.find({
+      $or: [
+        { customerId: req.user.userId },
+        { customerEmail: (req.user.email || "").toLowerCase().trim() },
+      ],
+    }).sort({ createdAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      count: bookings.length,
+      data: bookings,
+    });
+  } catch (error) {
+    console.error("Error fetching customer bookings:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+});
+
+// Customer: Cancel a booking while status is "requested"
+app.patch("/api/bookings/:id/cancel", verifyToken, async (req, res) => {
+  try {
+    const booking = await Booking.findById(req.params.id);
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        message: "Booking not found",
+      });
+    }
+
+    const isOwner =
+      String(booking.customerId) === String(req.user.userId) ||
+      (booking.customerEmail || "").toLowerCase() ===
+        (req.user.email || "").toLowerCase();
+
+    if (!isOwner && req.user?.role !== "admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: You cannot cancel this booking",
+      });
+    }
+
+    if (booking.status !== "requested") {
+      return res.status(400).json({
+        success: false,
+        message: "Only requested bookings can be cancelled.",
+      });
+    }
+
+    booking.status = "cancelled";
+    await booking.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Booking request cancelled successfully",
+      data: booking,
+    });
+  } catch (error) {
+    console.error("Error cancelling booking:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+});
+
+// Customer: Pay for a completed booking
+app.post("/api/bookings/:id/pay", verifyToken, async (req, res) => {
+  try {
+    const booking = await Booking.findById(req.params.id);
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        message: "Booking not found",
+      });
+    }
+
+    const isOwner =
+      String(booking.customerId) === String(req.user.userId) ||
+      (booking.customerEmail || "").toLowerCase() ===
+        (req.user.email || "").toLowerCase();
+
+    if (!isOwner) {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: You can only pay for your own booking",
+      });
+    }
+
+    if (booking.status !== "completed") {
+      return res.status(400).json({
+        success: false,
+        message: "Payment is available once the repair is completed.",
+      });
+    }
+
+    booking.paymentStatus = "paid";
+    await booking.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Payment completed successfully",
+      data: booking,
+    });
+  } catch (error) {
+    console.error("Error processing booking payment:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+});
+
 // Technician: Add a new service (sets status to "pending" for admin approval)
 app.post(
   "/api/technician/services",
