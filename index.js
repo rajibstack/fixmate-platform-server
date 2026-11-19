@@ -851,6 +851,105 @@ app.post("/api/bookings/:id/pay", verifyToken, async (req, res) => {
   }
 });
 
+// Technician: Get bookings assigned to logged-in technician
+app.get(
+  "/api/technician/bookings",
+  verifyToken,
+  verifyTechnician,
+  async (req, res) => {
+    try {
+      const normalizedEmail = (req.user.email || "").toLowerCase().trim();
+      const bookings = await Booking.find({
+        $or: [
+          { technicianId: req.user.userId },
+          { technicianEmail: normalizedEmail },
+        ],
+      }).sort({ createdAt: -1 });
+
+      res.status(200).json({
+        success: true,
+        count: bookings.length,
+        data: bookings,
+      });
+    } catch (error) {
+      console.error("Error fetching technician bookings:", error);
+      res.status(500).json({
+        success: false,
+        message: "Internal Server Error",
+      });
+    }
+  }
+);
+
+// Technician: Move booking status forward one step at a time
+app.patch(
+  "/api/bookings/:id/status",
+  verifyToken,
+  verifyTechnician,
+  async (req, res) => {
+    try {
+      const { status } = req.body;
+      const nextStatus = (status || "").toString().toLowerCase().trim();
+
+      const booking = await Booking.findById(req.params.id);
+      if (!booking) {
+        return res.status(404).json({
+          success: false,
+          message: "Booking not found",
+        });
+      }
+
+      const normalizedEmail = (req.user.email || "").toLowerCase().trim();
+      const isAssignedTech =
+        (booking.technicianId &&
+          String(booking.technicianId) === String(req.user.userId)) ||
+        (booking.technicianEmail || "").toLowerCase().trim() ===
+          normalizedEmail;
+
+      if (!isAssignedTech) {
+        return res.status(403).json({
+          success: false,
+          message: "Forbidden: This booking is not assigned to you",
+        });
+      }
+
+      const currentStatus = (booking.status || "requested")
+        .toString()
+        .toLowerCase()
+        .trim();
+
+      const allowedTransitions = {
+        requested: ["accepted", "rejected"],
+        accepted: ["in-progress"],
+        "in-progress": ["completed"],
+      };
+
+      const validNextStatuses = allowedTransitions[currentStatus] || [];
+      if (!validNextStatuses.includes(nextStatus)) {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot change status from "${currentStatus}" to "${nextStatus}".`,
+        });
+      }
+
+      booking.status = nextStatus;
+      await booking.save();
+
+      res.status(200).json({
+        success: true,
+        message: `Booking status updated to ${nextStatus}`,
+        data: booking,
+      });
+    } catch (error) {
+      console.error("Error updating booking status:", error);
+      res.status(500).json({
+        success: false,
+        message: "Internal Server Error",
+      });
+    }
+  }
+);
+
 // Technician: Add a new service (sets status to "pending" for admin approval)
 app.post(
   "/api/technician/services",
