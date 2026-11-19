@@ -396,6 +396,7 @@ app.post(
         technicianName: safeName,
         technicianEmail: safeEmail,
         status: "pending",
+        available: true,
       });
 
       res.status(201).json({
@@ -431,6 +432,117 @@ app.get(
       });
     } catch (error) {
       console.error("Error fetching technician services:", error);
+      res.status(500).json({
+        success: false,
+        message: "Internal Server Error",
+      });
+    }
+  }
+);
+
+// Technician: Update own service (edit details or toggle available)
+app.patch(
+  "/api/technician/services/:id",
+  verifyToken,
+  verifyTechnician,
+  async (req, res) => {
+    try {
+      const service = await Service.findById(req.params.id);
+      if (!service) {
+        return res.status(404).json({
+          success: false,
+          message: "Service not found",
+        });
+      }
+
+      if (service.technicianEmail !== req.user.email) {
+        return res.status(403).json({
+          success: false,
+          message: "Forbidden: You can only update your own services",
+        });
+      }
+
+      const allowedFields = [
+        "title",
+        "category",
+        "mode",
+        "price",
+        "duration",
+        "area",
+        "description",
+        "image",
+        "available",
+      ];
+
+      for (const field of allowedFields) {
+        if (req.body[field] !== undefined) {
+          service[field] =
+            field === "price" ? Number(req.body[field]) : req.body[field];
+        }
+      }
+
+      const editedCoreFields = [
+        "title",
+        "category",
+        "mode",
+        "price",
+        "duration",
+        "area",
+        "description",
+        "image",
+      ].some((key) => req.body[key] !== undefined);
+
+      if (editedCoreFields && service.status === "approved") {
+        service.status = "pending";
+      }
+
+      await service.save();
+
+      res.status(200).json({
+        success: true,
+        message: "Service updated successfully",
+        data: service,
+      });
+    } catch (error) {
+      console.error("Error updating technician service:", error);
+      res.status(500).json({
+        success: false,
+        message: "Internal Server Error",
+      });
+    }
+  }
+);
+
+// Technician: Delete own service
+app.delete(
+  "/api/technician/services/:id",
+  verifyToken,
+  verifyTechnician,
+  async (req, res) => {
+    try {
+      const service = await Service.findById(req.params.id);
+      if (!service) {
+        return res.status(404).json({
+          success: false,
+          message: "Service not found",
+        });
+      }
+
+      if (service.technicianEmail !== req.user.email) {
+        return res.status(403).json({
+          success: false,
+          message: "Forbidden: You can only delete your own services",
+        });
+      }
+
+      await Service.findByIdAndDelete(req.params.id);
+
+      res.status(200).json({
+        success: true,
+        message: "Service deleted successfully",
+      });
+    } catch (error) {
+      console.error("Error deleting technician service:", error);
       res.status(500).json({
         success: false,
         message: "Internal Server Error",

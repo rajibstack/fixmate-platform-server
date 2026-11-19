@@ -18,6 +18,7 @@ const serviceSchema = new mongoose.Schema(
       enum: ["pending", "approved", "rejected"],
       default: "pending",
     },
+    available: { type: Boolean, default: true },
   },
   { timestamps: true },
 );
