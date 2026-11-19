@@ -9,6 +9,7 @@ const User = require("./models/User");
 
 const app = express();
 const port = process.env.PORT || 5000;
+const JWT_SECRET = process.env.JWT_SECRET || "fixmate_secret_key";
 
 const allowedOrigins = [
   "http://localhost:3000",
@@ -28,7 +29,41 @@ app.use(
   })
 );
 
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+// Auth & Role Middleware
+const verifyToken = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({
+      success: false,
+      message: "Unauthorized: No token provided",
+    });
+  }
+
+  const token = authHeader.split(" ")[1];
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch {
+    return res.status(401).json({
+      success: false,
+      message: "Unauthorized: Invalid or expired token",
+    });
+  }
+};
+
+const verifyTechnician = (req, res, next) => {
+  if (req.user?.role !== "technician") {
+    return res.status(403).json({
+      success: false,
+      message: "Forbidden: Technician access required",
+    });
+  }
+  next();
+};
 
 app.get("/", (req, res) => {
   res.send(`
@@ -112,7 +147,7 @@ app.post("/api/auth/signup", async (req, res) => {
 
     const token = jwt.sign(
       { userId: newUser._id, email: newUser.email, role: newUser.role },
-      process.env.JWT_SECRET || "fixmate_secret_key",
+      JWT_SECRET,
       { expiresIn: "7d" }
     );
 
@@ -172,7 +207,7 @@ app.post("/api/auth/login", async (req, res) => {
 
     const token = jwt.sign(
       { userId: user._id, email: user.email, role: user.role },
-      process.env.JWT_SECRET || "fixmate_secret_key",
+      JWT_SECRET,
       { expiresIn: "7d" }
     );
 
@@ -237,7 +272,7 @@ app.post("/api/auth/google", async (req, res) => {
 
     const token = jwt.sign(
       { userId: user._id, email: user.email, role: user.role },
-      process.env.JWT_SECRET || "fixmate_secret_key",
+      JWT_SECRET,
       { expiresIn: "7d" }
     );
 
@@ -262,16 +297,19 @@ app.post("/api/auth/google", async (req, res) => {
   }
 });
 
+// Public Services (only approved services, or legacy services without status field)
 app.get("/api/services", async (req, res) => {
   try {
     const { category } = req.query;
-    let query = {};
-    
+    let query = {
+      $or: [{ status: "approved" }, { status: { $exists: false } }],
+    };
+
     if (category && category !== "All") {
       query.category = category;
     }
 
-    const services = await Service.find(query);
+    const services = await Service.find(query).sort({ createdAt: -1 });
     res.status(200).json({
       success: true,
       count: services.length,
@@ -307,6 +345,99 @@ app.get("/api/services/:id", async (req, res) => {
     });
   }
 });
+
+// Technician: Add a new service (sets status to "pending" for admin approval)
+app.post(
+  "/api/technician/services",
+  verifyToken,
+  verifyTechnician,
+  async (req, res) => {
+    try {
+      const {
+        title,
+        category,
+        mode,
+        price,
+        duration,
+        area,
+        description,
+        image,
+        technicianName,
+      } = req.body;
+
+      if (!title || !category || !price || !area || !description) {
+        return res.status(400).json({
+          success: false,
+          message: "Title, category, price, area, and description are required.",
+        });
+      }
+
+      if (Number(price) <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Price must be greater than 0.",
+        });
+      }
+
+      const dbUser = await User.findById(req.user.userId);
+      const safeName =
+        dbUser?.name || technicianName?.trim() || req.user.email.split("@")[0];
+      const safeEmail = dbUser?.email || req.user.email;
+
+      const newService = await Service.create({
+        title: title.trim(),
+        category: category.trim(),
+        mode: mode?.trim() || "Home Visit",
+        price: Number(price),
+        duration: duration?.trim() || "1-2 hours",
+        area: area.trim(),
+        description: description.trim(),
+        image: image || "",
+        technicianName: safeName,
+        technicianEmail: safeEmail,
+        status: "pending",
+      });
+
+      res.status(201).json({
+        success: true,
+        message: "Service submitted for review.",
+        data: newService,
+      });
+    } catch (error) {
+      console.error("Error creating technician service:", error);
+      res.status(500).json({
+        success: false,
+        message: "Internal Server Error",
+      });
+    }
+  }
+);
+
+// Technician: Get own services (for My services page)
+app.get(
+  "/api/technician/services",
+  verifyToken,
+  verifyTechnician,
+  async (req, res) => {
+    try {
+      const services = await Service.find({
+        technicianEmail: req.user.email,
+      }).sort({ createdAt: -1 });
+
+      res.status(200).json({
+        success: true,
+        count: services.length,
+        data: services,
+      });
+    } catch (error) {
+      console.error("Error fetching technician services:", error);
+      res.status(500).json({
+        success: false,
+        message: "Internal Server Error",
+      });
+    }
+  }
+);
 
 async function startServer() {
   try {
