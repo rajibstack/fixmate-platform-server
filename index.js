@@ -485,6 +485,25 @@ app.get("/api/admin/services", verifyToken, verifyAdmin, async (req, res) => {
   }
 });
 
+// Admin: Get all bookings across the platform (read-only view)
+app.get("/api/admin/bookings", verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const bookings = await Booking.find({}).sort({ createdAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      count: bookings.length,
+      data: bookings,
+    });
+  } catch (error) {
+    console.error("Error fetching admin bookings:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+});
+
 // Admin: Approve or reject a service
 app.patch(
   "/api/admin/services/:id/status",
