@@ -834,8 +834,19 @@ app.post("/api/bookings/:id/pay", verifyToken, async (req, res) => {
       });
     }
 
-    booking.paymentStatus = "paid";
-    await booking.save();
+    if (booking.paymentStatus !== "paid") {
+      booking.paymentStatus = "paid";
+      if (!booking.transactionId) {
+        booking.transactionId = `pi_${Date.now()
+          .toString(36)
+          .toUpperCase()}${Math.random()
+          .toString(36)
+          .substring(2, 6)
+          .toUpperCase()}`;
+      }
+      booking.paidAt = new Date();
+      await booking.save();
+    }
 
     res.status(200).json({
       success: true,
