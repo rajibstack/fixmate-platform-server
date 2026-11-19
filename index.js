@@ -6,6 +6,7 @@ require("dotenv").config();
 const { connectDB } = require("./config/db");
 const Service = require("./models/Service");
 const User = require("./models/User");
+const Booking = require("./models/Booking");
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -552,6 +553,7 @@ app.get("/api/services", async (req, res) => {
   }
 });
 
+// Public Service Details (includes technician profile summary)
 app.get("/api/services/:id", async (req, res) => {
   try {
     const service = await Service.findById(req.params.id);
@@ -561,12 +563,169 @@ app.get("/api/services/:id", async (req, res) => {
         message: "Service not found",
       });
     }
+
+    let technicianSummary = {
+      _id: null,
+      name: service.technicianName || "Verified Technician",
+      email: service.technicianEmail || "",
+      avatar: "",
+      area: service.area || "",
+      bio: "",
+      phone: "",
+    };
+
+    if (service.technicianEmail) {
+      const techUser = await User.findOne({
+        email: service.technicianEmail.toLowerCase().trim(),
+      }).select("name email avatar area bio phone role");
+
+      if (techUser) {
+        technicianSummary = {
+          _id: techUser._id,
+          name: techUser.name || service.technicianName || "Verified Technician",
+          email: techUser.email,
+          avatar: techUser.avatar || "",
+          area: techUser.area || service.area || "",
+          bio: techUser.bio || "",
+          phone: techUser.phone || "",
+        };
+      }
+    }
+
     res.status(200).json({
       success: true,
       data: service,
+      technician: technicianSummary,
     });
   } catch (error) {
     console.error("Error fetching service details:", error);
+    if (error?.name === "CastError") {
+      return res.status(404).json({
+        success: false,
+        message: "Service not found",
+      });
+    }
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+});
+
+// Customer: Create a repair booking request
+app.post("/api/bookings", verifyToken, async (req, res) => {
+  try {
+    if (req.user?.role !== "customer") {
+      return res.status(403).json({
+        success: false,
+        message: "Only customers can request a repair",
+      });
+    }
+
+    const { serviceId, phone, address, preferredDate, problemDescription } =
+      req.body;
+
+    if (!serviceId || !phone || !address || !preferredDate || !problemDescription) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Phone, address, preferred date, and problem description are required.",
+      });
+    }
+
+    const trimmedDesc = String(problemDescription).trim();
+    if (trimmedDesc.length < 20) {
+      return res.status(400).json({
+        success: false,
+        message: "Problem description must be at least 20 characters.",
+      });
+    }
+
+    const todayStr = new Date().toISOString().split("T")[0];
+    if (String(preferredDate) < todayStr) {
+      return res.status(400).json({
+        success: false,
+        message: "Preferred date must be today or a future date.",
+      });
+    }
+
+    const service = await Service.findById(serviceId);
+    const isApproved =
+      (service?.status || "approved").toString().toLowerCase() === "approved";
+    const isAvailable = service?.available !== false;
+
+    if (!service || !isApproved || !isAvailable) {
+      return res.status(404).json({
+        success: false,
+        message: "This service is unavailable or not found.",
+      });
+    }
+
+    const customer = await User.findById(req.user.userId).select(
+      "name email role"
+    );
+    if (!customer) {
+      return res.status(404).json({
+        success: false,
+        message: "Customer account not found.",
+      });
+    }
+
+    const existingActiveBooking = await Booking.findOne({
+      serviceId: service._id,
+      customerEmail: customer.email.toLowerCase().trim(),
+      status: { $in: ["requested", "accepted", "in-progress"] },
+    });
+
+    if (existingActiveBooking) {
+      return res.status(409).json({
+        success: false,
+        message: "You already have an active request for this service",
+      });
+    }
+
+    const techUser = service.technicianEmail
+      ? await User.findOne({
+          email: service.technicianEmail.toLowerCase().trim(),
+        }).select("_id name email phone area")
+      : null;
+
+    const newBooking = await Booking.create({
+      serviceId: service._id,
+      serviceTitle: service.title,
+      serviceCategory: service.category,
+      serviceMode: service.mode || "Home Visit",
+      serviceArea: service.area || "",
+      startingPrice: Number(service.price || 0),
+      estimatedDuration: service.duration || "1-2 hours",
+      serviceImage: service.image || "",
+      technicianId: techUser?._id || null,
+      technicianName: techUser?.name || service.technicianName || "Technician",
+      technicianEmail: (
+        techUser?.email ||
+        service.technicianEmail ||
+        ""
+      ).toLowerCase(),
+      technicianPhone: techUser?.phone || "",
+      technicianArea: techUser?.area || service.area || "",
+      customerId: customer._id,
+      customerName: customer.name,
+      customerEmail: customer.email.toLowerCase(),
+      phone: String(phone).trim(),
+      address: String(address).trim(),
+      preferredDate: String(preferredDate).trim(),
+      problemDescription: trimmedDesc,
+      status: "requested",
+      paymentStatus: "unpaid",
+    });
+
+    res.status(201).json({
+      success: true,
+      message: "Repair request submitted successfully.",
+      data: newBooking,
+    });
+  } catch (error) {
+    console.error("Error creating booking request:", error);
     res.status(500).json({
       success: false,
       message: "Internal Server Error",
