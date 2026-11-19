@@ -221,6 +221,9 @@ app.post("/api/auth/login", async (req, res) => {
         email: user.email,
         role: user.role,
         avatar: user.avatar || "",
+        phone: user.phone || "",
+        area: user.area || "",
+        bio: user.bio || "",
       },
     });
   } catch (error) {
@@ -285,11 +288,91 @@ app.post("/api/auth/google", async (req, res) => {
         name: user.name,
         email: user.email,
         role: user.role,
-        avatar: user.avatar,
+        avatar: user.avatar || "",
+        phone: user.phone || "",
+        area: user.area || "",
+        bio: user.bio || "",
       },
     });
   } catch (error) {
     console.error("Google auth error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+});
+
+// Get current logged-in user profile
+app.get("/api/auth/me", verifyToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.userId).select("-password");
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      user,
+    });
+  } catch (error) {
+    console.error("Get profile error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+});
+
+// Update current logged-in user profile (email & role stay locked)
+app.patch("/api/auth/profile", verifyToken, async (req, res) => {
+  try {
+    const { name, phone, area, bio, avatar } = req.body;
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Full name is required",
+      });
+    }
+
+    const user = await User.findById(req.user.userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    user.name = name.trim();
+    if (phone !== undefined) user.phone = phone.trim();
+    if (area !== undefined) user.area = area.trim();
+    if (bio !== undefined) user.bio = bio.trim();
+    if (avatar !== undefined) user.avatar = avatar;
+
+    await user.save();
+
+    const safeUser = {
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      avatar: user.avatar || "",
+      phone: user.phone || "",
+      area: user.area || "",
+      bio: user.bio || "",
+    };
+
+    res.status(200).json({
+      success: true,
+      message: "Profile updated successfully",
+      user: safeUser,
+    });
+  } catch (error) {
+    console.error("Update profile error:", error);
     res.status(500).json({
       success: false,
       message: "Internal Server Error",
