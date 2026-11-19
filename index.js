@@ -1,8 +1,11 @@
 const express = require("express");
 const cors = require("cors");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
 require("dotenv").config();
 const { connectDB } = require("./config/db");
 const Service = require("./models/Service");
+const User = require("./models/User");
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -75,6 +78,127 @@ app.get("/", (req, res) => {
     </body>
     </html>
   `);
+});
+
+app.post("/api/auth/signup", async (req, res) => {
+  try {
+    const { name, email, password, role } = req.body;
+
+    if (!name || !email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "All fields are required",
+      });
+    }
+
+    const assignedRole = role === "technician" ? "technician" : "customer";
+
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({
+        success: false,
+        message: "User already exists with this email",
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const newUser = await User.create({
+      name,
+      email,
+      password: hashedPassword,
+      role: assignedRole,
+    });
+
+    const token = jwt.sign(
+      { userId: newUser._id, email: newUser.email, role: newUser.role },
+      process.env.JWT_SECRET || "fixmate_secret_key",
+      { expiresIn: "7d" }
+    );
+
+    res.status(201).json({
+      success: true,
+      message: "Account created successfully",
+      token,
+      user: {
+        _id: newUser._id,
+        name: newUser.name,
+        email: newUser.email,
+        role: newUser.role,
+      },
+    });
+  } catch (error) {
+    console.error("Signup error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+});
+
+app.post("/api/auth/google", async (req, res) => {
+  try {
+    const { access_token, role } = req.body;
+
+    if (!access_token) {
+      return res.status(400).json({
+        success: false,
+        message: "Google access token is required",
+      });
+    }
+
+    const googleRes = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
+      headers: { Authorization: `Bearer ${access_token}` },
+    });
+
+    if (!googleRes.ok) {
+      return res.status(401).json({
+        success: false,
+        message: "Invalid Google token",
+      });
+    }
+
+    const googleUser = await googleRes.json();
+    const { sub, email, name, picture } = googleUser;
+
+    let user = await User.findOne({ email });
+
+    if (!user) {
+      const assignedRole = role === "technician" ? "technician" : "customer";
+      user = await User.create({
+        name,
+        email,
+        googleId: sub,
+        avatar: picture || "",
+        role: assignedRole,
+      });
+    }
+
+    const token = jwt.sign(
+      { userId: user._id, email: user.email, role: user.role },
+      process.env.JWT_SECRET || "fixmate_secret_key",
+      { expiresIn: "7d" }
+    );
+
+    res.status(200).json({
+      success: true,
+      message: "Signed in with Google successfully",
+      token,
+      user: {
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        avatar: user.avatar,
+      },
+    });
+  } catch (error) {
+    console.error("Google auth error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
 });
 
 app.get("/api/services", async (req, res) => {
