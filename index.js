@@ -12,6 +12,8 @@ const app = express();
 const port = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || "fixmate_secret_key";
 
+const ContactMessage = require("./models/ContactMessage");
+
 const allowedOrigins = [
   "http://localhost:3000",
   process.env.CLIENT_URL,
@@ -1199,3 +1201,65 @@ async function startServer() {
 }
 
 startServer();
+
+// Admin: Fetch all contact messages
+app.get("/api/admin/messages", verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const messages = await ContactMessage.find({}).sort({ createdAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      count: messages.length,
+      data: messages,
+    });
+  } catch (error) {
+    console.error("Error fetching contact messages:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+});
+
+// Admin: Update message status (unread / read / replied)
+app.patch(
+  "/api/admin/messages/:id/status",
+  verifyToken,
+  verifyAdmin,
+  async (req, res) => {
+    try {
+      const { status } = req.body;
+      if (!["unread", "read", "replied"].includes(status)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid status value",
+        });
+      }
+
+      const updated = await ContactMessage.findByIdAndUpdate(
+        req.params.id,
+        { status },
+        { new: true }
+      );
+
+      if (!updated) {
+        return res.status(404).json({
+          success: false,
+          message: "Message not found",
+        });
+      }
+
+      res.status(200).json({
+        success: true,
+        message: "Message status updated",
+        data: updated,
+      });
+    } catch (error) {
+      console.error("Error updating message status:", error);
+      res.status(500).json({
+        success: false,
+        message: "Internal Server Error",
+      });
+    }
+  }
+);
