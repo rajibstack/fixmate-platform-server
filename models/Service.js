@@ -35,6 +35,7 @@ const serviceSchema = new mongoose.Schema(
 
 serviceSchema.index({ status: 1, available: 1, category: 1, mode: 1 });
 serviceSchema.index({ price: 1, createdAt: -1 });
+serviceSchema.index({ technicianId: 1 });
 serviceSchema.index({ technicianEmail: 1 });
 
 module.exports = mongoose.model("Service", serviceSchema);

@@ -49,7 +49,10 @@ const verifyToken = (req, res, next) => {
   const token = authHeader.split(" ")[1];
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded;
+    req.user = {
+      ...decoded,
+      role: (decoded?.role || "").toString().toLowerCase().trim(),
+    };
     next();
   } catch {
     return res.status(401).json({
@@ -91,6 +94,129 @@ const verifyAdmin = (req, res, next) => {
 
 function escapeRegex(value = "") {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function fetchUsersByIdAndEmail(records = []) {
+  const techIds = new Set();
+  const techEmails = new Set();
+
+  for (const item of records) {
+    if (item?.technicianId) {
+      techIds.add(String(item.technicianId));
+    }
+    if (item?.technicianEmail) {
+      techEmails.add(String(item.technicianEmail).toLowerCase().trim());
+    }
+  }
+
+  const orQuery = [];
+  if (techIds.size > 0) {
+    orQuery.push({ _id: { $in: Array.from(techIds) } });
+  }
+  if (techEmails.size > 0) {
+    orQuery.push({ email: { $in: Array.from(techEmails) } });
+  }
+
+  const usersById = new Map();
+  const usersByEmail = new Map();
+
+  if (orQuery.length > 0) {
+    const techUsers = await User.find({ $or: orQuery }).select(
+      "_id name email avatar area phone"
+    );
+    for (const u of techUsers) {
+      usersById.set(String(u._id), u);
+      if (u.email) {
+        usersByEmail.set(String(u.email).toLowerCase().trim(), u);
+      }
+    }
+  }
+
+  return { usersById, usersByEmail };
+}
+
+async function attachLatestTechnicianNames(services = []) {
+  if (!Array.isArray(services) || services.length === 0) {
+    return [];
+  }
+
+  const { usersById, usersByEmail } = await fetchUsersByIdAndEmail(services);
+
+  return services.map((srv) => {
+    const obj = typeof srv?.toObject === "function" ? srv.toObject() : { ...srv };
+    const idKey = obj.technicianId ? String(obj.technicianId) : "";
+    const emailKey = obj.technicianEmail
+      ? String(obj.technicianEmail).toLowerCase().trim()
+      : "";
+
+    const matchedUser =
+      (idKey && usersById.get(idKey)) ||
+      (emailKey && usersByEmail.get(emailKey)) ||
+      null;
+
+    const latestName =
+      matchedUser?.name ||
+      obj.technician?.name ||
+      obj.technicianName ||
+      "Verified Technician";
+
+    return {
+      ...obj,
+      technicianName: latestName,
+      technician: {
+        ...(obj.technician && typeof obj.technician === "object"
+          ? obj.technician
+          : {}),
+        _id: matchedUser?._id || obj.technicianId || null,
+        name: latestName,
+        email: matchedUser?.email || obj.technicianEmail || "",
+        avatar: matchedUser?.avatar || obj.technician?.avatar || "",
+      },
+    };
+  });
+}
+
+async function attachLatestTechnicianNamesToBookings(bookings = []) {
+  if (!Array.isArray(bookings) || bookings.length === 0) {
+    return [];
+  }
+
+  const { usersById, usersByEmail } = await fetchUsersByIdAndEmail(bookings);
+
+  return bookings.map((booking) => {
+    const obj =
+      typeof booking?.toObject === "function" ? booking.toObject() : { ...booking };
+    const idKey = obj.technicianId ? String(obj.technicianId) : "";
+    const emailKey = obj.technicianEmail
+      ? String(obj.technicianEmail).toLowerCase().trim()
+      : "";
+
+    const matchedUser =
+      (idKey && usersById.get(idKey)) ||
+      (emailKey && usersByEmail.get(emailKey)) ||
+      null;
+
+    const latestName =
+      matchedUser?.name ||
+      obj.technician?.name ||
+      obj.technicianName ||
+      "Technician";
+
+    return {
+      ...obj,
+      technicianName: latestName,
+      technician: {
+        ...(obj.technician && typeof obj.technician === "object"
+          ? obj.technician
+          : {}),
+        _id: matchedUser?._id || obj.technicianId || null,
+        name: latestName,
+        email: matchedUser?.email || obj.technicianEmail || "",
+        phone: matchedUser?.phone || obj.technicianPhone || "",
+        area: matchedUser?.area || obj.technicianArea || "",
+      },
+    };
+  });
 }
 
 // ==========================================
@@ -385,13 +511,27 @@ async function updateUserProfileHandler(req, res) {
       });
     }
 
-    user.name = String(name).trim();
+    const trimmedName = String(name).trim();
+    user.name = trimmedName;
     if (phone !== undefined) user.phone = String(phone).trim();
     if (area !== undefined) user.area = String(area).trim();
     if (bio !== undefined) user.bio = String(bio).trim();
     if (avatar !== undefined) user.avatar = avatar;
 
     await user.save();
+
+    const normalizedEmail = String(user.email || "").toLowerCase().trim();
+    const ownerFilter = {
+      $or: [
+        { technicianId: user._id },
+        ...(normalizedEmail ? [{ technicianEmail: normalizedEmail }] : []),
+      ],
+    };
+
+    await Promise.all([
+      Service.updateMany(ownerFilter, { $set: { technicianName: trimmedName } }),
+      Booking.updateMany(ownerFilter, { $set: { technicianName: trimmedName } }),
+    ]);
 
     const safeUser = {
       _id: user._id,
@@ -469,6 +609,7 @@ app.get("/api/services", async (req, res) => {
         $or: [
           { title: { $regex: safePattern, $options: "i" } },
           { category: { $regex: safePattern, $options: "i" } },
+          { technicianName: { $regex: safePattern, $options: "i" } },
         ],
       });
     }
@@ -482,9 +623,10 @@ app.get("/api/services", async (req, res) => {
       sortOption = { createdAt: -1 };
     }
 
-    const services = await Service.find({ $and: andConditions }).sort(
+    const rawServices = await Service.find({ $and: andConditions }).sort(
       sortOption
     );
+    const services = await attachLatestTechnicianNames(rawServices);
 
     res.status(200).json({
       success: true,
@@ -538,9 +680,12 @@ app.get("/api/services/:id", async (req, res) => {
       }
     }
 
+    const serviceObj = service.toObject();
+    serviceObj.technicianName = technicianSummary.name;
+
     res.status(200).json({
       success: true,
-      data: service,
+      data: serviceObj,
       technician: technicianSummary,
     });
   } catch (error) {
@@ -686,12 +831,13 @@ app.post("/api/bookings", verifyToken, verifyCustomer, async (req, res) => {
 app.get("/api/bookings/my", verifyToken, verifyCustomer, async (req, res) => {
   try {
     const normalizedEmail = (req.user.email || "").toLowerCase().trim();
-    const bookings = await Booking.find({
+    const rawBookings = await Booking.find({
       $or: [
         { customerId: req.user.userId },
         { customerEmail: normalizedEmail },
       ],
     }).sort({ createdAt: -1 });
+    const bookings = await attachLatestTechnicianNamesToBookings(rawBookings);
 
     res.status(200).json({
       success: true,
@@ -851,12 +997,13 @@ app.post(
 async function getTechnicianBookingsHandler(req, res) {
   try {
     const normalizedEmail = (req.user.email || "").toLowerCase().trim();
-    const bookings = await Booking.find({
+    const rawBookings = await Booking.find({
       $or: [
         { technicianId: req.user.userId },
         { technicianEmail: normalizedEmail },
       ],
     }).sort({ createdAt: -1 });
+    const bookings = await attachLatestTechnicianNamesToBookings(rawBookings);
 
     res.status(200).json({
       success: true,
@@ -1036,12 +1183,13 @@ app.get(
   async (req, res) => {
     try {
       const normalizedEmail = (req.user.email || "").toLowerCase().trim();
-      const services = await Service.find({
+      const rawServices = await Service.find({
         $or: [
           { technicianId: req.user.userId },
           { technicianEmail: normalizedEmail },
         ],
       }).sort({ createdAt: -1 });
+      const services = await attachLatestTechnicianNames(rawServices);
 
       res.status(200).json({
         success: true,
@@ -1271,7 +1419,8 @@ app.patch(
 
 app.get("/api/admin/services", verifyToken, verifyAdmin, async (req, res) => {
   try {
-    const services = await Service.find({}).sort({ createdAt: -1 });
+    const rawServices = await Service.find({}).sort({ createdAt: -1 });
+    const services = await attachLatestTechnicianNames(rawServices);
 
     res.status(200).json({
       success: true,
@@ -1289,7 +1438,8 @@ app.get("/api/admin/services", verifyToken, verifyAdmin, async (req, res) => {
 
 app.get("/api/admin/bookings", verifyToken, verifyAdmin, async (req, res) => {
   try {
-    const bookings = await Booking.find({}).sort({ createdAt: -1 });
+    const rawBookings = await Booking.find({}).sort({ createdAt: -1 });
+    const bookings = await attachLatestTechnicianNamesToBookings(rawBookings);
 
     res.status(200).json({
       success: true,
