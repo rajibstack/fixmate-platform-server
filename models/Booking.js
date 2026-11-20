@@ -14,22 +14,34 @@ const bookingSchema = new mongoose.Schema(
     },
     serviceCategory: {
       type: String,
-      required: true,
+      default: "General Repair",
       trim: true,
     },
     serviceMode: {
       type: String,
-      required: true,
+      default: "Home Visit",
       trim: true,
     },
     serviceArea: {
       type: String,
-      required: true,
+      default: "",
       trim: true,
     },
     startingPrice: {
       type: Number,
       required: true,
+    },
+    totalPrice: {
+      type: Number,
+      default: 0,
+    },
+    finalAmount: {
+      type: Number,
+      default: 0,
+    },
+    paidAmount: {
+      type: Number,
+      default: 0,
     },
     estimatedDuration: {
       type: String,
@@ -100,13 +112,28 @@ const bookingSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ["requested", "accepted", "in-progress", "completed", "cancelled"],
+      enum: [
+        "requested",
+        "accepted",
+        "in-progress",
+        "completed",
+        "cancelled",
+        "rejected",
+      ],
       default: "requested",
     },
     paymentStatus: {
       type: String,
       enum: ["unpaid", "paid"],
       default: "unpaid",
+    },
+    transactionId: {
+      type: String,
+      default: "",
+    },
+    paidAt: {
+      type: Date,
+      default: null,
     },
   },
   { timestamps: true }

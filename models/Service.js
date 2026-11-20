@@ -11,8 +11,18 @@ const serviceSchema = new mongoose.Schema(
     description: { type: String, required: true, trim: true },
     image: { type: String, default: "" },
     features: { type: [String], default: [] },
+    technicianId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
     technicianName: { type: String, required: true, trim: true },
-    technicianEmail: { type: String, required: true, trim: true },
+    technicianEmail: {
+      type: String,
+      required: true,
+      lowercase: true,
+      trim: true,
+    },
     status: {
       type: String,
       enum: ["pending", "approved", "rejected"],
@@ -20,7 +30,11 @@ const serviceSchema = new mongoose.Schema(
     },
     available: { type: Boolean, default: true },
   },
-  { timestamps: true },
+  { timestamps: true }
 );
+
+serviceSchema.index({ status: 1, available: 1, category: 1, mode: 1 });
+serviceSchema.index({ price: 1, createdAt: -1 });
+serviceSchema.index({ technicianEmail: 1 });
 
 module.exports = mongoose.model("Service", serviceSchema);

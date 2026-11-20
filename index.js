@@ -7,12 +7,11 @@ const { connectDB } = require("./config/db");
 const Service = require("./models/Service");
 const User = require("./models/User");
 const Booking = require("./models/Booking");
+const ContactMessage = require("./models/ContactMessage");
 
 const app = express();
 const port = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || "fixmate_secret_key";
-
-const ContactMessage = require("./models/ContactMessage");
 
 const allowedOrigins = [
   "http://localhost:3000",
@@ -35,7 +34,9 @@ app.use(
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
-// Auth & Role Middleware
+// ==========================================
+// Auth & Role Middlewares (Challenge 2)
+// ==========================================
 const verifyToken = (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -58,6 +59,16 @@ const verifyToken = (req, res, next) => {
   }
 };
 
+const verifyCustomer = (req, res, next) => {
+  if (req.user?.role !== "customer") {
+    return res.status(403).json({
+      success: false,
+      message: "Forbidden: Customer access required",
+    });
+  }
+  next();
+};
+
 const verifyTechnician = (req, res, next) => {
   if (req.user?.role !== "technician") {
     return res.status(403).json({
@@ -78,6 +89,13 @@ const verifyAdmin = (req, res, next) => {
   next();
 };
 
+function escapeRegex(value = "") {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// ==========================================
+// Health / Root Route
+// ==========================================
 app.get("/", (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -128,6 +146,9 @@ app.get("/", (req, res) => {
   `);
 });
 
+// ==========================================
+// Auth & User Profile Routes
+// ==========================================
 app.post("/api/auth/signup", async (req, res) => {
   try {
     const { name, email, password, role } = req.body;
@@ -139,9 +160,10 @@ app.post("/api/auth/signup", async (req, res) => {
       });
     }
 
+    const normalizedEmail = String(email).toLowerCase().trim();
     const assignedRole = role === "technician" ? "technician" : "customer";
 
-    const existingUser = await User.findOne({ email });
+    const existingUser = await User.findOne({ email: normalizedEmail });
     if (existingUser) {
       return res.status(400).json({
         success: false,
@@ -152,8 +174,8 @@ app.post("/api/auth/signup", async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const newUser = await User.create({
-      name,
-      email,
+      name: String(name).trim(),
+      email: normalizedEmail,
       password: hashedPassword,
       role: assignedRole,
     });
@@ -206,7 +228,8 @@ app.post("/api/auth/login", async (req, res) => {
     if (!user.password) {
       return res.status(400).json({
         success: false,
-        message: "This account uses Google sign-in. Please continue with Google.",
+        message:
+          "This account uses Google sign-in. Please continue with Google.",
       });
     }
 
@@ -259,9 +282,12 @@ app.post("/api/auth/google", async (req, res) => {
       });
     }
 
-    const googleRes = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
-      headers: { Authorization: `Bearer ${access_token}` },
-    });
+    const googleRes = await fetch(
+      "https://www.googleapis.com/oauth2/v3/userinfo",
+      {
+        headers: { Authorization: `Bearer ${access_token}` },
+      }
+    );
 
     if (!googleRes.ok) {
       return res.status(401).json({
@@ -272,14 +298,15 @@ app.post("/api/auth/google", async (req, res) => {
 
     const googleUser = await googleRes.json();
     const { sub, email, name, picture } = googleUser;
+    const normalizedEmail = String(email || "").toLowerCase().trim();
 
-    let user = await User.findOne({ email });
+    let user = await User.findOne({ email: normalizedEmail });
 
     if (!user) {
       const assignedRole = role === "technician" ? "technician" : "customer";
       user = await User.create({
         name,
-        email,
+        email: normalizedEmail,
         googleId: sub,
         avatar: picture || "",
         role: assignedRole,
@@ -316,7 +343,6 @@ app.post("/api/auth/google", async (req, res) => {
   }
 });
 
-// Get current logged-in user profile
 app.get("/api/auth/me", verifyToken, async (req, res) => {
   try {
     const user = await User.findById(req.user.userId).select("-password");
@@ -340,12 +366,11 @@ app.get("/api/auth/me", verifyToken, async (req, res) => {
   }
 });
 
-// Update current logged-in user profile (email & role stay locked)
-app.patch("/api/auth/profile", verifyToken, async (req, res) => {
+async function updateUserProfileHandler(req, res) {
   try {
     const { name, phone, area, bio, avatar } = req.body;
 
-    if (!name || !name.trim()) {
+    if (!name || !String(name).trim()) {
       return res.status(400).json({
         success: false,
         message: "Full name is required",
@@ -360,10 +385,10 @@ app.patch("/api/auth/profile", verifyToken, async (req, res) => {
       });
     }
 
-    user.name = name.trim();
-    if (phone !== undefined) user.phone = phone.trim();
-    if (area !== undefined) user.area = area.trim();
-    if (bio !== undefined) user.bio = bio.trim();
+    user.name = String(name).trim();
+    if (phone !== undefined) user.phone = String(phone).trim();
+    if (area !== undefined) user.area = String(area).trim();
+    if (bio !== undefined) user.bio = String(bio).trim();
     if (avatar !== undefined) user.avatar = avatar;
 
     await user.save();
@@ -391,175 +416,76 @@ app.patch("/api/auth/profile", verifyToken, async (req, res) => {
       message: "Internal Server Error",
     });
   }
-});
+}
 
-// Admin: Get all users
-app.get("/api/admin/users", verifyToken, verifyAdmin, async (req, res) => {
-  try {
-    const users = await User.find({})
-      .select("-password")
-      .sort({ createdAt: -1 });
+app.patch("/api/users/profile", verifyToken, updateUserProfileHandler);
+app.patch("/api/auth/profile", verifyToken, updateUserProfileHandler);
 
-    res.status(200).json({
-      success: true,
-      count: users.length,
-      data: users,
-    });
-  } catch (error) {
-    console.error("Error fetching users:", error);
-    res.status(500).json({
-      success: false,
-      message: "Internal Server Error",
-    });
-  }
-});
-
-// Admin: Update a user's role (cannot change own role)
-app.patch(
-  "/api/admin/users/:id/role",
-  verifyToken,
-  verifyAdmin,
-  async (req, res) => {
-    try {
-      const { role } = req.body;
-      const allowedRoles = ["customer", "technician", "admin"];
-
-      if (!allowedRoles.includes(role)) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid role specified",
-        });
-      }
-
-      const targetUser = await User.findById(req.params.id).select("-password");
-      if (!targetUser) {
-        return res.status(404).json({
-          success: false,
-          message: "User not found",
-        });
-      }
-
-      const isSelf =
-        String(targetUser._id) === String(req.user.userId) ||
-        targetUser.email?.toLowerCase() === req.user.email?.toLowerCase();
-
-      if (isSelf) {
-        return res.status(400).json({
-          success: false,
-          message: "Your own role cannot be changed here.",
-        });
-      }
-
-      targetUser.role = role;
-      await targetUser.save();
-
-      res.status(200).json({
-        success: true,
-        message: "User role updated successfully",
-        data: targetUser,
-      });
-    } catch (error) {
-      console.error("Error updating user role:", error);
-      res.status(500).json({
-        success: false,
-        message: "Internal Server Error",
-      });
-    }
-  }
-);
-
-// Admin: Get all services (pending, approved, rejected)
-app.get("/api/admin/services", verifyToken, verifyAdmin, async (req, res) => {
-  try {
-    const services = await Service.find({}).sort({ createdAt: -1 });
-
-    res.status(200).json({
-      success: true,
-      count: services.length,
-      data: services,
-    });
-  } catch (error) {
-    console.error("Error fetching admin services:", error);
-    res.status(500).json({
-      success: false,
-      message: "Internal Server Error",
-    });
-  }
-});
-
-// Admin: Get all bookings across the platform (read-only view)
-app.get("/api/admin/bookings", verifyToken, verifyAdmin, async (req, res) => {
-  try {
-    const bookings = await Booking.find({}).sort({ createdAt: -1 });
-
-    res.status(200).json({
-      success: true,
-      count: bookings.length,
-      data: bookings,
-    });
-  } catch (error) {
-    console.error("Error fetching admin bookings:", error);
-    res.status(500).json({
-      success: false,
-      message: "Internal Server Error",
-    });
-  }
-});
-
-// Admin: Approve or reject a service
-app.patch(
-  "/api/admin/services/:id/status",
-  verifyToken,
-  verifyAdmin,
-  async (req, res) => {
-    try {
-      const { status } = req.body;
-      if (!["pending", "approved", "rejected"].includes(status)) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid status value",
-        });
-      }
-
-      const service = await Service.findById(req.params.id);
-      if (!service) {
-        return res.status(404).json({
-          success: false,
-          message: "Service not found",
-        });
-      }
-
-      service.status = status;
-      await service.save();
-
-      res.status(200).json({
-        success: true,
-        message: `Service marked as ${status}`,
-        data: service,
-      });
-    } catch (error) {
-      console.error("Error updating service status:", error);
-      res.status(500).json({
-        success: false,
-        message: "Internal Server Error",
-      });
-    }
-  }
-);
-
-// Public Services (only approved services, or legacy services without status field)
+// ==========================================
+// Public Service Routes (Challenge 1)
+// ==========================================
 app.get("/api/services", async (req, res) => {
   try {
-    const { category } = req.query;
-    let query = {
-      $or: [{ status: "approved" }, { status: { $exists: false } }],
-    };
+    const { search, q, category, mode, sort } = req.query;
+    const andConditions = [
+      { $or: [{ status: "approved" }, { status: { $exists: false } }] },
+      { $or: [{ available: true }, { available: { $exists: false } }] },
+    ];
 
-    if (category && category !== "All") {
-      query.category = category;
+    const trimmedCategory = (category || "").toString().trim();
+    if (trimmedCategory && trimmedCategory.toLowerCase() !== "all") {
+      const catLower = trimmedCategory.toLowerCase();
+      if (catLower === "ac" || catLower.includes("ac & refrigeration")) {
+        andConditions.push({
+          category: {
+            $regex: "(ac|refrigerator|fridge|cooling)",
+            $options: "i",
+          },
+        });
+      } else {
+        andConditions.push({
+          category: {
+            $regex: `^${escapeRegex(trimmedCategory)}$`,
+            $options: "i",
+          },
+        });
+      }
     }
 
-    const services = await Service.find(query).sort({ createdAt: -1 });
+    const trimmedMode = (mode || "").toString().trim();
+    if (trimmedMode && trimmedMode.toLowerCase() !== "all") {
+      andConditions.push({
+        mode: {
+          $regex: `^${escapeRegex(trimmedMode)}$`,
+          $options: "i",
+        },
+      });
+    }
+
+    const searchText = (search || q || "").toString().trim();
+    if (searchText) {
+      const safePattern = escapeRegex(searchText);
+      andConditions.push({
+        $or: [
+          { title: { $regex: safePattern, $options: "i" } },
+          { category: { $regex: safePattern, $options: "i" } },
+        ],
+      });
+    }
+
+    let sortOption = { createdAt: -1 };
+    if (sort === "price-asc") {
+      sortOption = { price: 1, createdAt: -1 };
+    } else if (sort === "price-desc") {
+      sortOption = { price: -1, createdAt: -1 };
+    } else if (sort === "newest") {
+      sortOption = { createdAt: -1 };
+    }
+
+    const services = await Service.find({ $and: andConditions }).sort(
+      sortOption
+    );
+
     res.status(200).json({
       success: true,
       count: services.length,
@@ -574,7 +500,6 @@ app.get("/api/services", async (req, res) => {
   }
 });
 
-// Public Service Details (includes technician profile summary)
 app.get("/api/services/:id", async (req, res) => {
   try {
     const service = await Service.findById(req.params.id);
@@ -633,20 +558,21 @@ app.get("/api/services/:id", async (req, res) => {
   }
 });
 
-// Customer: Create a repair booking request
-app.post("/api/bookings", verifyToken, async (req, res) => {
+// ==========================================
+// Customer Booking & Payment Routes
+// ==========================================
+app.post("/api/bookings", verifyToken, verifyCustomer, async (req, res) => {
   try {
-    if (req.user?.role !== "customer") {
-      return res.status(403).json({
-        success: false,
-        message: "Only customers can request a repair",
-      });
-    }
-
     const { serviceId, phone, address, preferredDate, problemDescription } =
       req.body;
 
-    if (!serviceId || !phone || !address || !preferredDate || !problemDescription) {
+    if (
+      !serviceId ||
+      !phone ||
+      !address ||
+      !preferredDate ||
+      !problemDescription
+    ) {
       return res.status(400).json({
         success: false,
         message:
@@ -692,9 +618,11 @@ app.post("/api/bookings", verifyToken, async (req, res) => {
       });
     }
 
+    const normalizedCustomerEmail = customer.email.toLowerCase().trim();
+
     const existingActiveBooking = await Booking.findOne({
       serviceId: service._id,
-      customerEmail: customer.email.toLowerCase().trim(),
+      customerEmail: normalizedCustomerEmail,
       status: { $in: ["requested", "accepted", "in-progress"] },
     });
 
@@ -718,9 +646,10 @@ app.post("/api/bookings", verifyToken, async (req, res) => {
       serviceMode: service.mode || "Home Visit",
       serviceArea: service.area || "",
       startingPrice: Number(service.price || 0),
+      totalPrice: Number(service.price || 0),
       estimatedDuration: service.duration || "1-2 hours",
       serviceImage: service.image || "",
-      technicianId: techUser?._id || null,
+      technicianId: techUser?._id || service.technicianId || null,
       technicianName: techUser?.name || service.technicianName || "Technician",
       technicianEmail: (
         techUser?.email ||
@@ -731,7 +660,7 @@ app.post("/api/bookings", verifyToken, async (req, res) => {
       technicianArea: techUser?.area || service.area || "",
       customerId: customer._id,
       customerName: customer.name,
-      customerEmail: customer.email.toLowerCase(),
+      customerEmail: normalizedCustomerEmail,
       phone: String(phone).trim(),
       address: String(address).trim(),
       preferredDate: String(preferredDate).trim(),
@@ -754,13 +683,13 @@ app.post("/api/bookings", verifyToken, async (req, res) => {
   }
 });
 
-// Customer: Get own bookings
-app.get("/api/bookings/my", verifyToken, async (req, res) => {
+app.get("/api/bookings/my", verifyToken, verifyCustomer, async (req, res) => {
   try {
+    const normalizedEmail = (req.user.email || "").toLowerCase().trim();
     const bookings = await Booking.find({
       $or: [
         { customerId: req.user.userId },
-        { customerEmail: (req.user.email || "").toLowerCase().trim() },
+        { customerEmail: normalizedEmail },
       ],
     }).sort({ createdAt: -1 });
 
@@ -778,57 +707,69 @@ app.get("/api/bookings/my", verifyToken, async (req, res) => {
   }
 });
 
-// Customer: Cancel a booking while status is "requested"
-app.patch("/api/bookings/:id/cancel", verifyToken, async (req, res) => {
+app.patch(
+  "/api/bookings/:id/cancel",
+  verifyToken,
+  verifyCustomer,
+  async (req, res) => {
+    try {
+      const booking = await Booking.findById(req.params.id);
+      if (!booking) {
+        return res.status(404).json({
+          success: false,
+          message: "Booking not found",
+        });
+      }
+
+      const normalizedEmail = (req.user.email || "").toLowerCase().trim();
+      const isOwner =
+        (booking.customerId &&
+          String(booking.customerId) === String(req.user.userId)) ||
+        (booking.customerEmail || "").toLowerCase().trim() === normalizedEmail;
+
+      if (!isOwner) {
+        return res.status(403).json({
+          success: false,
+          message: "Forbidden: You cannot cancel another customer's booking",
+        });
+      }
+
+      if (booking.status !== "requested") {
+        return res.status(400).json({
+          success: false,
+          message: "Only requested bookings can be cancelled.",
+        });
+      }
+
+      booking.status = "cancelled";
+      await booking.save();
+
+      res.status(200).json({
+        success: true,
+        message: "Booking request cancelled successfully",
+        data: booking,
+      });
+    } catch (error) {
+      console.error("Error cancelling booking:", error);
+      res.status(500).json({
+        success: false,
+        message: "Internal Server Error",
+      });
+    }
+  }
+);
+
+async function processCustomerBookingPayment(req, res) {
   try {
-    const booking = await Booking.findById(req.params.id);
-    if (!booking) {
-      return res.status(404).json({
-        success: false,
-        message: "Booking not found",
-      });
-    }
-
-    const isOwner =
-      String(booking.customerId) === String(req.user.userId) ||
-      (booking.customerEmail || "").toLowerCase() ===
-        (req.user.email || "").toLowerCase();
-
-    if (!isOwner && req.user?.role !== "admin") {
-      return res.status(403).json({
-        success: false,
-        message: "Forbidden: You cannot cancel this booking",
-      });
-    }
-
-    if (booking.status !== "requested") {
+    const bookingId = req.params.id || req.body?.bookingId;
+    if (!bookingId) {
       return res.status(400).json({
         success: false,
-        message: "Only requested bookings can be cancelled.",
+        message: "Booking ID is required",
       });
     }
 
-    booking.status = "cancelled";
-    await booking.save();
-
-    res.status(200).json({
-      success: true,
-      message: "Booking request cancelled successfully",
-      data: booking,
-    });
-  } catch (error) {
-    console.error("Error cancelling booking:", error);
-    res.status(500).json({
-      success: false,
-      message: "Internal Server Error",
-    });
-  }
-});
-
-// Customer: Pay for a completed booking
-app.post("/api/bookings/:id/pay", verifyToken, async (req, res) => {
-  try {
-    const booking = await Booking.findById(req.params.id);
+    const booking = await Booking.findById(bookingId);
     if (!booking) {
       return res.status(404).json({
         success: false,
@@ -836,10 +777,11 @@ app.post("/api/bookings/:id/pay", verifyToken, async (req, res) => {
       });
     }
 
+    const normalizedEmail = (req.user.email || "").toLowerCase().trim();
     const isOwner =
-      String(booking.customerId) === String(req.user.userId) ||
-      (booking.customerEmail || "").toLowerCase() ===
-        (req.user.email || "").toLowerCase();
+      (booking.customerId &&
+        String(booking.customerId) === String(req.user.userId)) ||
+      (booking.customerEmail || "").toLowerCase().trim() === normalizedEmail;
 
     if (!isOwner) {
       return res.status(403).json({
@@ -851,27 +793,34 @@ app.post("/api/bookings/:id/pay", verifyToken, async (req, res) => {
     if (booking.status !== "completed") {
       return res.status(400).json({
         success: false,
-        message: "Payment is available once the repair is completed.",
+        message: "Payment is available only once the repair is completed.",
       });
     }
 
-    if (booking.paymentStatus !== "paid") {
-      booking.paymentStatus = "paid";
-      if (!booking.transactionId) {
-        booking.transactionId = `pi_${Date.now()
-          .toString(36)
-          .toUpperCase()}${Math.random()
-          .toString(36)
-          .substring(2, 6)
-          .toUpperCase()}`;
-      }
-      booking.paidAt = new Date();
-      await booking.save();
+    if (booking.paymentStatus === "paid") {
+      return res.status(400).json({
+        success: false,
+        message: "This booking has already been paid.",
+      });
     }
+
+    const amount = Number(
+      booking.finalAmount || booking.totalPrice || booking.startingPrice || 0
+    );
+    const transactionId = `pi_${Date.now()
+      .toString(36)
+      .toUpperCase()}${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
+
+    booking.paymentStatus = "paid";
+    booking.paidAmount = amount;
+    booking.transactionId = transactionId;
+    booking.paidAt = new Date();
+    await booking.save();
 
     res.status(200).json({
       success: true,
       message: "Payment completed successfully",
+      transactionId,
       data: booking,
     });
   } catch (error) {
@@ -881,39 +830,61 @@ app.post("/api/bookings/:id/pay", verifyToken, async (req, res) => {
       message: "Internal Server Error",
     });
   }
-});
+}
 
-// Technician: Get bookings assigned to logged-in technician
+app.post(
+  "/api/payments/create-checkout-session",
+  verifyToken,
+  verifyCustomer,
+  processCustomerBookingPayment
+);
+app.post(
+  "/api/bookings/:id/pay",
+  verifyToken,
+  verifyCustomer,
+  processCustomerBookingPayment
+);
+
+// ==========================================
+// Technician Booking & Service Routes
+// ==========================================
+async function getTechnicianBookingsHandler(req, res) {
+  try {
+    const normalizedEmail = (req.user.email || "").toLowerCase().trim();
+    const bookings = await Booking.find({
+      $or: [
+        { technicianId: req.user.userId },
+        { technicianEmail: normalizedEmail },
+      ],
+    }).sort({ createdAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      count: bookings.length,
+      data: bookings,
+    });
+  } catch (error) {
+    console.error("Error fetching technician bookings:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+}
+
+app.get(
+  "/api/bookings/technician",
+  verifyToken,
+  verifyTechnician,
+  getTechnicianBookingsHandler
+);
 app.get(
   "/api/technician/bookings",
   verifyToken,
   verifyTechnician,
-  async (req, res) => {
-    try {
-      const normalizedEmail = (req.user.email || "").toLowerCase().trim();
-      const bookings = await Booking.find({
-        $or: [
-          { technicianId: req.user.userId },
-          { technicianEmail: normalizedEmail },
-        ],
-      }).sort({ createdAt: -1 });
-
-      res.status(200).json({
-        success: true,
-        count: bookings.length,
-        data: bookings,
-      });
-    } catch (error) {
-      console.error("Error fetching technician bookings:", error);
-      res.status(500).json({
-        success: false,
-        message: "Internal Server Error",
-      });
-    }
-  }
+  getTechnicianBookingsHandler
 );
 
-// Technician: Move booking status forward one step at a time
 app.patch(
   "/api/bookings/:id/status",
   verifyToken,
@@ -982,83 +953,94 @@ app.patch(
   }
 );
 
-// Technician: Add a new service (sets status to "pending" for admin approval)
+async function createTechnicianServiceHandler(req, res) {
+  try {
+    const {
+      title,
+      category,
+      mode,
+      price,
+      duration,
+      area,
+      description,
+      image,
+      technicianName,
+    } = req.body;
+
+    if (!title || !category || !price || !area || !description) {
+      return res.status(400).json({
+        success: false,
+        message: "Title, category, price, area, and description are required.",
+      });
+    }
+
+    if (Number(price) <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Price must be greater than 0.",
+      });
+    }
+
+    const dbUser = await User.findById(req.user.userId);
+    const safeName =
+      dbUser?.name || technicianName?.trim() || req.user.email.split("@")[0];
+    const safeEmail = (dbUser?.email || req.user.email).toLowerCase().trim();
+
+    const newService = await Service.create({
+      title: String(title).trim(),
+      category: String(category).trim(),
+      mode: mode ? String(mode).trim() : "Home Visit",
+      price: Number(price),
+      duration: duration ? String(duration).trim() : "1-2 hours",
+      area: String(area).trim(),
+      description: String(description).trim(),
+      image: image || "",
+      technicianId: req.user.userId,
+      technicianName: safeName,
+      technicianEmail: safeEmail,
+      status: "pending",
+      available: true,
+    });
+
+    res.status(201).json({
+      success: true,
+      message: "Service submitted for review.",
+      data: newService,
+    });
+  } catch (error) {
+    console.error("Error creating technician service:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+}
+
+app.post(
+  "/api/services",
+  verifyToken,
+  verifyTechnician,
+  createTechnicianServiceHandler
+);
 app.post(
   "/api/technician/services",
   verifyToken,
   verifyTechnician,
-  async (req, res) => {
-    try {
-      const {
-        title,
-        category,
-        mode,
-        price,
-        duration,
-        area,
-        description,
-        image,
-        technicianName,
-      } = req.body;
-
-      if (!title || !category || !price || !area || !description) {
-        return res.status(400).json({
-          success: false,
-          message: "Title, category, price, area, and description are required.",
-        });
-      }
-
-      if (Number(price) <= 0) {
-        return res.status(400).json({
-          success: false,
-          message: "Price must be greater than 0.",
-        });
-      }
-
-      const dbUser = await User.findById(req.user.userId);
-      const safeName =
-        dbUser?.name || technicianName?.trim() || req.user.email.split("@")[0];
-      const safeEmail = dbUser?.email || req.user.email;
-
-      const newService = await Service.create({
-        title: title.trim(),
-        category: category.trim(),
-        mode: mode?.trim() || "Home Visit",
-        price: Number(price),
-        duration: duration?.trim() || "1-2 hours",
-        area: area.trim(),
-        description: description.trim(),
-        image: image || "",
-        technicianName: safeName,
-        technicianEmail: safeEmail,
-        status: "pending",
-        available: true,
-      });
-
-      res.status(201).json({
-        success: true,
-        message: "Service submitted for review.",
-        data: newService,
-      });
-    } catch (error) {
-      console.error("Error creating technician service:", error);
-      res.status(500).json({
-        success: false,
-        message: "Internal Server Error",
-      });
-    }
-  }
+  createTechnicianServiceHandler
 );
 
-// Technician: Get own services (for My services page)
 app.get(
   "/api/technician/services",
   verifyToken,
   verifyTechnician,
   async (req, res) => {
     try {
+      const normalizedEmail = (req.user.email || "").toLowerCase().trim();
       const services = await Service.find({
-        technicianEmail: req.user.email,
+        $or: [
+          { technicianId: req.user.userId },
+          { technicianEmail: normalizedEmail },
+        ],
       }).sort({ createdAt: -1 });
 
       res.status(200).json({
@@ -1076,109 +1058,209 @@ app.get(
   }
 );
 
-// Technician: Update own service (edit details or toggle available)
+async function updateTechnicianServiceHandler(req, res) {
+  try {
+    const service = await Service.findById(req.params.id);
+    if (!service) {
+      return res.status(404).json({
+        success: false,
+        message: "Service not found",
+      });
+    }
+
+    const normalizedEmail = (req.user.email || "").toLowerCase().trim();
+    const isOwner =
+      (service.technicianId &&
+        String(service.technicianId) === String(req.user.userId)) ||
+      (service.technicianEmail || "").toLowerCase().trim() === normalizedEmail;
+
+    if (!isOwner) {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: You can only update your own services",
+      });
+    }
+
+    const allowedFields = [
+      "title",
+      "category",
+      "mode",
+      "price",
+      "duration",
+      "area",
+      "description",
+      "image",
+      "available",
+    ];
+
+    for (const field of allowedFields) {
+      if (req.body[field] !== undefined) {
+        service[field] =
+          field === "price" ? Number(req.body[field]) : req.body[field];
+      }
+    }
+
+    const editedCoreFields = [
+      "title",
+      "category",
+      "mode",
+      "price",
+      "duration",
+      "area",
+      "description",
+      "image",
+    ].some((key) => req.body[key] !== undefined);
+
+    if (editedCoreFields && service.status === "approved") {
+      service.status = "pending";
+    }
+
+    await service.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Service updated successfully",
+      data: service,
+    });
+  } catch (error) {
+    console.error("Error updating technician service:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+}
+
+app.patch(
+  "/api/services/:id",
+  verifyToken,
+  verifyTechnician,
+  updateTechnicianServiceHandler
+);
 app.patch(
   "/api/technician/services/:id",
   verifyToken,
   verifyTechnician,
-  async (req, res) => {
-    try {
-      const service = await Service.findById(req.params.id);
-      if (!service) {
-        return res.status(404).json({
-          success: false,
-          message: "Service not found",
-        });
-      }
-
-      if (service.technicianEmail !== req.user.email) {
-        return res.status(403).json({
-          success: false,
-          message: "Forbidden: You can only update your own services",
-        });
-      }
-
-      const allowedFields = [
-        "title",
-        "category",
-        "mode",
-        "price",
-        "duration",
-        "area",
-        "description",
-        "image",
-        "available",
-      ];
-
-      for (const field of allowedFields) {
-        if (req.body[field] !== undefined) {
-          service[field] =
-            field === "price" ? Number(req.body[field]) : req.body[field];
-        }
-      }
-
-      const editedCoreFields = [
-        "title",
-        "category",
-        "mode",
-        "price",
-        "duration",
-        "area",
-        "description",
-        "image",
-      ].some((key) => req.body[key] !== undefined);
-
-      if (editedCoreFields && service.status === "approved") {
-        service.status = "pending";
-      }
-
-      await service.save();
-
-      res.status(200).json({
-        success: true,
-        message: "Service updated successfully",
-        data: service,
-      });
-    } catch (error) {
-      console.error("Error updating technician service:", error);
-      res.status(500).json({
-        success: false,
-        message: "Internal Server Error",
-      });
-    }
-  }
+  updateTechnicianServiceHandler
 );
 
-// Technician: Delete own service
+async function deleteTechnicianServiceHandler(req, res) {
+  try {
+    const service = await Service.findById(req.params.id);
+    if (!service) {
+      return res.status(404).json({
+        success: false,
+        message: "Service not found",
+      });
+    }
+
+    const normalizedEmail = (req.user.email || "").toLowerCase().trim();
+    const isOwner =
+      (service.technicianId &&
+        String(service.technicianId) === String(req.user.userId)) ||
+      (service.technicianEmail || "").toLowerCase().trim() === normalizedEmail;
+
+    if (!isOwner) {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: You can only delete your own services",
+      });
+    }
+
+    await Service.findByIdAndDelete(req.params.id);
+
+    res.status(200).json({
+      success: true,
+      message: "Service deleted successfully",
+    });
+  } catch (error) {
+    console.error("Error deleting technician service:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+}
+
+app.delete(
+  "/api/services/:id",
+  verifyToken,
+  verifyTechnician,
+  deleteTechnicianServiceHandler
+);
 app.delete(
   "/api/technician/services/:id",
   verifyToken,
   verifyTechnician,
+  deleteTechnicianServiceHandler
+);
+
+// ==========================================
+// Admin Routes
+// ==========================================
+app.get("/api/admin/users", verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const users = await User.find({}).select("-password").sort({ createdAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      count: users.length,
+      data: users,
+    });
+  } catch (error) {
+    console.error("Error fetching users:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+});
+
+app.patch(
+  "/api/admin/users/:id/role",
+  verifyToken,
+  verifyAdmin,
   async (req, res) => {
     try {
-      const service = await Service.findById(req.params.id);
-      if (!service) {
+      const { role } = req.body;
+      const allowedRoles = ["customer", "technician", "admin"];
+
+      if (!allowedRoles.includes(role)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid role specified",
+        });
+      }
+
+      const targetUser = await User.findById(req.params.id).select("-password");
+      if (!targetUser) {
         return res.status(404).json({
           success: false,
-          message: "Service not found",
+          message: "User not found",
         });
       }
 
-      if (service.technicianEmail !== req.user.email) {
-        return res.status(403).json({
+      const isSelf =
+        String(targetUser._id) === String(req.user.userId) ||
+        targetUser.email?.toLowerCase() === req.user.email?.toLowerCase();
+
+      if (isSelf) {
+        return res.status(400).json({
           success: false,
-          message: "Forbidden: You can only delete your own services",
+          message: "Your own role cannot be changed here.",
         });
       }
 
-      await Service.findByIdAndDelete(req.params.id);
+      targetUser.role = role;
+      await targetUser.save();
 
       res.status(200).json({
         success: true,
-        message: "Service deleted successfully",
+        message: "User role updated successfully",
+        data: targetUser,
       });
     } catch (error) {
-      console.error("Error deleting technician service:", error);
+      console.error("Error updating user role:", error);
       res.status(500).json({
         success: false,
         message: "Internal Server Error",
@@ -1187,22 +1269,127 @@ app.delete(
   }
 );
 
-async function startServer() {
+app.get("/api/admin/services", verifyToken, verifyAdmin, async (req, res) => {
   try {
-    await connectDB();
+    const services = await Service.find({}).sort({ createdAt: -1 });
 
-    app.listen(port, () => {
-      console.log(`FixMate Server is running on port ${port}`);
+    res.status(200).json({
+      success: true,
+      count: services.length,
+      data: services,
     });
   } catch (error) {
-    console.error("Failed to start server:", error);
-    process.exit(1);
+    console.error("Error fetching admin services:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+});
+
+app.get("/api/admin/bookings", verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const bookings = await Booking.find({}).sort({ createdAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      count: bookings.length,
+      data: bookings,
+    });
+  } catch (error) {
+    console.error("Error fetching admin bookings:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+});
+
+app.get("/api/admin/payments", verifyToken, verifyAdmin, async (req, res) => {
+  try {
+    const payments = await Booking.find({ paymentStatus: "paid" }).sort({
+      paidAt: -1,
+      updatedAt: -1,
+    });
+
+    const totalRevenue = payments.reduce(
+      (sum, item) =>
+        sum +
+        Number(
+          item.paidAmount ||
+            item.finalAmount ||
+            item.totalPrice ||
+            item.startingPrice ||
+            0
+        ),
+      0
+    );
+
+    res.status(200).json({
+      success: true,
+      count: payments.length,
+      totalRevenue,
+      data: payments,
+    });
+  } catch (error) {
+    console.error("Error fetching admin payments:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+});
+
+async function updateServiceApprovalHandler(req, res) {
+  try {
+    const rawStatus = req.body.status || req.body.approvalStatus;
+    const status = String(rawStatus || "").toLowerCase().trim();
+
+    if (!["pending", "approved", "rejected"].includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid status value",
+      });
+    }
+
+    const service = await Service.findById(req.params.id);
+    if (!service) {
+      return res.status(404).json({
+        success: false,
+        message: "Service not found",
+      });
+    }
+
+    service.status = status;
+    await service.save();
+
+    res.status(200).json({
+      success: true,
+      message: `Service marked as ${status}`,
+      data: service,
+    });
+  } catch (error) {
+    console.error("Error updating service status:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
   }
 }
 
-startServer();
+app.patch(
+  "/api/admin/services/:id/approval",
+  verifyToken,
+  verifyAdmin,
+  updateServiceApprovalHandler
+);
+app.patch(
+  "/api/admin/services/:id/status",
+  verifyToken,
+  verifyAdmin,
+  updateServiceApprovalHandler
+);
 
-// Admin: Fetch all contact messages
 app.get("/api/admin/messages", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const messages = await ContactMessage.find({}).sort({ createdAt: -1 });
@@ -1221,7 +1408,6 @@ app.get("/api/admin/messages", verifyToken, verifyAdmin, async (req, res) => {
   }
 });
 
-// Admin: Update message status (unread / read / replied)
 app.patch(
   "/api/admin/messages/:id/status",
   verifyToken,
@@ -1239,7 +1425,7 @@ app.patch(
       const updated = await ContactMessage.findByIdAndUpdate(
         req.params.id,
         { status },
-        { new: true }
+        { returnDocument: "after" }
       );
 
       if (!updated) {
@@ -1263,3 +1449,18 @@ app.patch(
     }
   }
 );
+
+async function startServer() {
+  try {
+    await connectDB();
+
+    app.listen(port, () => {
+      console.log(`FixMate Server is running on port ${port}`);
+    });
+  } catch (error) {
+    console.error("Failed to start server:", error);
+    process.exit(1);
+  }
+}
+
+startServer();
