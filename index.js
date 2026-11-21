@@ -129,6 +129,122 @@ function formatSafeUser(user) {
   };
 }
 
+function normalizeStatusStep(statusValue) {
+  const raw = String(statusValue || "")
+    .toLowerCase()
+    .trim();
+  if (raw === "in progress") return "in-progress";
+  return raw;
+}
+
+function buildStatusHistory(bookingLike = {}) {
+  const rawHistory = Array.isArray(bookingLike?.statusHistory)
+    ? bookingLike.statusHistory
+    : [];
+
+  const normalizedEntries = [];
+  for (const entry of rawHistory) {
+    if (!entry) continue;
+    const step = normalizeStatusStep(
+      typeof entry === "string" ? entry : entry.status
+    );
+    if (!step) continue;
+    const timestamp =
+      (typeof entry === "object" && entry.changedAt) ||
+      bookingLike.updatedAt ||
+      bookingLike.createdAt ||
+      new Date();
+    normalizedEntries.push({
+      status: step,
+      changedAt: timestamp,
+    });
+  }
+
+  const baseTime = bookingLike.createdAt || new Date();
+  const currentStatus = normalizeStatusStep(bookingLike.status || "requested");
+  const isPaid =
+    String(bookingLike.paymentStatus || "")
+      .toLowerCase()
+      .trim() === "paid";
+
+  const hasRequested = normalizedEntries.some(
+    (e) => e.status === "requested"
+  );
+  if (!hasRequested) {
+    normalizedEntries.unshift({
+      status: "requested",
+      changedAt: baseTime,
+    });
+  }
+
+  const progressionOrder = [
+    "requested",
+    "accepted",
+    "in-progress",
+    "completed",
+  ];
+  const currentIndex = progressionOrder.indexOf(currentStatus);
+
+  if (currentIndex > 0) {
+    for (let i = 1; i <= currentIndex; i++) {
+      const targetStep = progressionOrder[i];
+      const alreadyExists = normalizedEntries.some(
+        (e) => e.status === targetStep
+      );
+      if (!alreadyExists) {
+        normalizedEntries.push({
+          status: targetStep,
+          changedAt:
+            targetStep === currentStatus
+              ? bookingLike.updatedAt || new Date()
+              : bookingLike.updatedAt || baseTime,
+        });
+      }
+    }
+  }
+
+  if (
+    currentStatus &&
+    !progressionOrder.includes(currentStatus) &&
+    !normalizedEntries.some((e) => e.status === currentStatus)
+  ) {
+    normalizedEntries.push({
+      status: currentStatus,
+      changedAt: bookingLike.updatedAt || new Date(),
+    });
+  }
+
+  if (isPaid && !normalizedEntries.some((e) => e.status === "paid")) {
+    normalizedEntries.push({
+      status: "paid",
+      changedAt:
+        bookingLike.paidAt || bookingLike.updatedAt || new Date(),
+    });
+  }
+
+  return normalizedEntries;
+}
+
+async function appendBookingStatusHistory(bookingId, statusValue, changedAt = new Date()) {
+  const step = normalizeStatusStep(statusValue);
+  if (!bookingId || !step) return;
+
+  await Booking.collection.updateOne(
+    { _id: bookingId },
+    {
+      $push: {
+        statusHistory: {
+          status: step,
+          changedAt,
+        },
+      },
+      $set: {
+        updatedAt: changedAt,
+      },
+    }
+  );
+}
+
 function normalizeBookingRecord(booking) {
   const obj =
     typeof booking?.toObject === "function"
@@ -149,6 +265,7 @@ function normalizeBookingRecord(booking) {
     rating: hasValidRating ? Math.round(numericRating) : null,
     review: reviewText,
     reviewedAt: obj?.reviewedAt || null,
+    statusHistory: buildStatusHistory(obj),
   };
 }
 
@@ -1207,6 +1324,7 @@ app.post("/api/bookings", verifyToken, verifyCustomer, async (req, res) => {
     }
 
     const techUser = await findTechnicianUserRecord(service);
+    const createdAt = new Date();
 
     const newBooking = await Booking.create({
       serviceId: service._id,
@@ -1236,7 +1354,10 @@ app.post("/api/bookings", verifyToken, verifyCustomer, async (req, res) => {
       problemDescription: trimmedDesc,
       status: "requested",
       paymentStatus: "unpaid",
+      statusHistory: [{ status: "requested", changedAt: createdAt }],
     });
+
+    await appendBookingStatusHistory(newBooking._id, "requested", createdAt);
 
     res.status(201).json({
       success: true,
@@ -1314,13 +1435,17 @@ app.patch(
         });
       }
 
+      const cancelledAt = new Date();
       booking.status = "cancelled";
       await booking.save();
+      await appendBookingStatusHistory(booking._id, "cancelled", cancelledAt);
+
+      const freshRaw = await Booking.collection.findOne({ _id: booking._id });
 
       res.status(200).json({
         success: true,
         message: "Booking request cancelled successfully",
-        data: normalizeBookingRecord(booking),
+        data: normalizeBookingRecord(freshRaw || booking),
       });
     } catch (error) {
       console.error("Error cancelling booking:", error);
@@ -1383,12 +1508,14 @@ async function processCustomerBookingPayment(req, res) {
     const transactionId = `pi_${Date.now()
       .toString(36)
       .toUpperCase()}${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
+    const paidAt = new Date();
 
     booking.paymentStatus = "paid";
     booking.paidAmount = amount;
     booking.transactionId = transactionId;
-    booking.paidAt = new Date();
+    booking.paidAt = paidAt;
     await booking.save();
+    await appendBookingStatusHistory(booking._id, "paid", paidAt);
 
     await Payment.create({
       type: "booking",
@@ -1404,14 +1531,16 @@ async function processCustomerBookingPayment(req, res) {
       provider: "stripe",
       transactionId,
       status: "paid",
-      paidAt: booking.paidAt,
+      paidAt,
     });
+
+    const freshRaw = await Booking.collection.findOne({ _id: booking._id });
 
     res.status(200).json({
       success: true,
       message: "Payment completed successfully",
       transactionId,
-      data: normalizeBookingRecord(booking),
+      data: normalizeBookingRecord(freshRaw || booking),
     });
   } catch (error) {
     console.error("Error processing booking payment:", error);
@@ -1589,7 +1718,7 @@ app.patch(
   async (req, res) => {
     try {
       const { status } = req.body;
-      const nextStatus = (status || "").toString().toLowerCase().trim();
+      const nextStatus = normalizeStatusStep(status);
 
       const booking = await Booking.findById(req.params.id);
       if (!booking) {
@@ -1613,10 +1742,7 @@ app.patch(
         });
       }
 
-      const currentStatus = (booking.status || "requested")
-        .toString()
-        .toLowerCase()
-        .trim();
+      const currentStatus = normalizeStatusStep(booking.status || "requested");
 
       const allowedTransitions = {
         requested: ["accepted", "rejected"],
@@ -1632,13 +1758,17 @@ app.patch(
         });
       }
 
+      const changedAt = new Date();
       booking.status = nextStatus;
       await booking.save();
+      await appendBookingStatusHistory(booking._id, nextStatus, changedAt);
+
+      const freshRaw = await Booking.collection.findOne({ _id: booking._id });
 
       res.status(200).json({
         success: true,
         message: `Booking status updated to ${nextStatus}`,
-        data: normalizeBookingRecord(booking),
+        data: normalizeBookingRecord(freshRaw || booking),
       });
     } catch (error) {
       console.error("Error updating booking status:", error);
