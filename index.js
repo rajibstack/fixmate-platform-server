@@ -129,6 +129,120 @@ function formatSafeUser(user) {
   };
 }
 
+function normalizeBookingRecord(booking) {
+  const obj =
+    typeof booking?.toObject === "function"
+      ? booking.toObject({ getters: true })
+      : { ...booking };
+
+  const numericRating = Number(
+    obj?.rating ?? obj?.reviewRating ?? obj?.stars ?? 0
+  );
+  const hasValidRating =
+    Number.isFinite(numericRating) && numericRating >= 1 && numericRating <= 5;
+  const reviewText = String(
+    obj?.review ?? obj?.reviewText ?? obj?.comment ?? ""
+  ).trim();
+
+  return {
+    ...obj,
+    rating: hasValidRating ? Math.round(numericRating) : null,
+    review: reviewText,
+    reviewedAt: obj?.reviewedAt || null,
+  };
+}
+
+async function recalculateServiceRating(serviceId) {
+  if (!serviceId) return null;
+
+  const rawReviewedBookings = await Booking.collection
+    .find({
+      serviceId,
+      rating: { $gte: 1, $lte: 5 },
+    })
+    .sort({ reviewedAt: -1, updatedAt: -1, createdAt: -1 })
+    .toArray();
+
+  const reviewedBookings = rawReviewedBookings.map(normalizeBookingRecord);
+  const reviewCount = reviewedBookings.length;
+  const sum = reviewedBookings.reduce(
+    (acc, item) => acc + Number(item.rating || 0),
+    0
+  );
+  const averageRating =
+    reviewCount > 0 ? Number((sum / reviewCount).toFixed(1)) : 0;
+
+  const reviews = reviewedBookings.map((item) => ({
+    _id: item._id,
+    rating: Number(item.rating),
+    review: String(item.review || "").trim(),
+    customerName: item.customerName || "Customer",
+    reviewedAt: item.reviewedAt || item.updatedAt || item.createdAt,
+  }));
+
+  await Service.findByIdAndUpdate(serviceId, {
+    $set: {
+      averageRating,
+      reviewCount,
+    },
+  });
+
+  return {
+    averageRating,
+    reviewCount,
+    reviews,
+  };
+}
+
+async function attachRatingsToServices(services = []) {
+  if (!Array.isArray(services) || services.length === 0) {
+    return [];
+  }
+
+  const serviceIds = services
+    .map((s) =>
+      typeof s?.toObject === "function" ? s.toObject()._id : s?._id
+    )
+    .filter(Boolean);
+
+  if (serviceIds.length === 0) {
+    return services;
+  }
+
+  const reviewedBookings = await Booking.collection
+    .find({
+      serviceId: { $in: serviceIds },
+      rating: { $gte: 1, $lte: 5 },
+    })
+    .toArray();
+
+  const statsMap = new Map();
+  for (const b of reviewedBookings) {
+    const key = String(b.serviceId);
+    const current = statsMap.get(key) || { sum: 0, count: 0 };
+    current.sum += Number(b.rating || 0);
+    current.count += 1;
+    statsMap.set(key, current);
+  }
+
+  return services.map((srv) => {
+    const obj =
+      typeof srv?.toObject === "function" ? srv.toObject() : { ...srv };
+    const stat = statsMap.get(String(obj._id));
+    const reviewCount = stat ? stat.count : Number(obj.reviewCount || 0);
+    const averageRating =
+      stat && stat.count > 0
+        ? Number((stat.sum / stat.count).toFixed(1))
+        : Number(obj.averageRating || 0);
+
+    return {
+      ...obj,
+      averageRating,
+      reviewCount,
+    };
+  });
+}
+
 async function findTechnicianUserRecord(record = {}) {
   const orConditions = [];
   if (record?.technicianId) {
@@ -176,7 +290,7 @@ async function fetchUsersByIdAndEmail(records = []) {
 
   if (orQuery.length > 0) {
     const techUsers = await User.find({ $or: orQuery }).select(
-      "_id name email avatar area bio phone plan"
+      "_id name email avatar area bio phone role plan"
     );
     for (const u of techUsers) {
       usersById.set(String(u._id), u);
@@ -197,7 +311,8 @@ async function attachLatestTechnicianNames(services = []) {
   const { usersById, usersByEmail } = await fetchUsersByIdAndEmail(services);
 
   return services.map((srv) => {
-    const obj = typeof srv?.toObject === "function" ? srv.toObject() : { ...srv };
+    const obj =
+      typeof srv?.toObject === "function" ? srv.toObject() : { ...srv };
     const idKey = obj.technicianId ? String(obj.technicianId) : "";
     const emailKey = obj.technicianEmail
       ? String(obj.technicianEmail).toLowerCase().trim()
@@ -246,8 +361,7 @@ async function attachLatestTechnicianNamesToBookings(bookings = []) {
   const { usersById, usersByEmail } = await fetchUsersByIdAndEmail(bookings);
 
   return bookings.map((booking) => {
-    const obj =
-      typeof booking?.toObject === "function" ? booking.toObject() : { ...booking };
+    const obj = normalizeBookingRecord(booking);
     const idKey = obj.technicianId ? String(obj.technicianId) : "";
     const emailKey = obj.technicianEmail
       ? String(obj.technicianEmail).toLowerCase().trim()
@@ -924,7 +1038,8 @@ app.get("/api/services", async (req, res) => {
     const rawServices = await Service.find({ $and: andConditions }).sort(
       sortOption
     );
-    const services = await attachLatestTechnicianNames(rawServices);
+    const withTech = await attachLatestTechnicianNames(rawServices);
+    const services = await attachRatingsToServices(withTech);
 
     res.status(200).json({
       success: true,
@@ -978,16 +1093,28 @@ app.get("/api/services/:id", async (req, res) => {
       };
     }
 
+    const ratingSummary = (await recalculateServiceRating(service._id)) || {
+      averageRating: 0,
+      reviewCount: 0,
+      reviews: [],
+    };
+
     const serviceObj = service.toObject();
     serviceObj.technicianName = technicianSummary.name;
     serviceObj.technicianPlan = technicianSummary.plan;
     serviceObj.isVerifiedPro = technicianSummary.isVerifiedPro;
     serviceObj.technician = technicianSummary;
+    serviceObj.averageRating = ratingSummary.averageRating;
+    serviceObj.reviewCount = ratingSummary.reviewCount;
+    serviceObj.reviews = ratingSummary.reviews;
 
     res.status(200).json({
       success: true,
       data: serviceObj,
       technician: technicianSummary,
+      averageRating: ratingSummary.averageRating,
+      reviewCount: ratingSummary.reviewCount,
+      reviews: ratingSummary.reviews,
     });
   } catch (error) {
     console.error("Error fetching service details:", error);
@@ -1005,7 +1132,7 @@ app.get("/api/services/:id", async (req, res) => {
 });
 
 // ==========================================
-// Customer Booking & Payment Routes
+// Customer Booking, Payment & Review Routes
 // ==========================================
 app.post("/api/bookings", verifyToken, verifyCustomer, async (req, res) => {
   try {
@@ -1114,7 +1241,7 @@ app.post("/api/bookings", verifyToken, verifyCustomer, async (req, res) => {
     res.status(201).json({
       success: true,
       message: "Repair request submitted successfully.",
-      data: newBooking,
+      data: normalizeBookingRecord(newBooking),
     });
   } catch (error) {
     console.error("Error creating booking request:", error);
@@ -1128,12 +1255,15 @@ app.post("/api/bookings", verifyToken, verifyCustomer, async (req, res) => {
 app.get("/api/bookings/my", verifyToken, verifyCustomer, async (req, res) => {
   try {
     const normalizedEmail = (req.user.email || "").toLowerCase().trim();
-    const rawBookings = await Booking.find({
-      $or: [
-        { customerId: req.user.userId },
-        { customerEmail: normalizedEmail },
-      ],
-    }).sort({ createdAt: -1 });
+    const rawBookings = await Booking.collection
+      .find({
+        $or: [
+          { customerId: req.user.userId },
+          { customerEmail: normalizedEmail },
+        ],
+      })
+      .sort({ createdAt: -1 })
+      .toArray();
     const bookings = await attachLatestTechnicianNamesToBookings(rawBookings);
 
     res.status(200).json({
@@ -1190,7 +1320,7 @@ app.patch(
       res.status(200).json({
         success: true,
         message: "Booking request cancelled successfully",
-        data: booking,
+        data: normalizeBookingRecord(booking),
       });
     } catch (error) {
       console.error("Error cancelling booking:", error);
@@ -1281,7 +1411,7 @@ async function processCustomerBookingPayment(req, res) {
       success: true,
       message: "Payment completed successfully",
       transactionId,
-      data: booking,
+      data: normalizeBookingRecord(booking),
     });
   } catch (error) {
     console.error("Error processing booking payment:", error);
@@ -1305,18 +1435,124 @@ app.post(
   processCustomerBookingPayment
 );
 
+async function submitCustomerBookingReview(req, res) {
+  try {
+    const rawRating =
+      req.body?.rating ?? req.body?.reviewRating ?? req.body?.stars;
+    const rawReview =
+      req.body?.review ?? req.body?.reviewText ?? req.body?.comment ?? "";
+    const numericRating = Number(rawRating);
+    const trimmedReview = String(rawReview || "").trim();
+
+    if (
+      !Number.isFinite(numericRating) ||
+      numericRating < 1 ||
+      numericRating > 5
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Rating must be a number between 1 and 5.",
+      });
+    }
+
+    if (!trimmedReview) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide a short review.",
+      });
+    }
+
+    const booking = await Booking.findById(req.params.id);
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        message: "Booking not found",
+      });
+    }
+
+    const normalizedEmail = (req.user.email || "").toLowerCase().trim();
+    const isOwner =
+      (booking.customerId &&
+        String(booking.customerId) === String(req.user.userId)) ||
+      (booking.customerEmail || "").toLowerCase().trim() === normalizedEmail;
+
+    if (!isOwner) {
+      return res.status(403).json({
+        success: false,
+        message: "Forbidden: You can only review your own booking",
+      });
+    }
+
+    if (String(booking.paymentStatus || "").toLowerCase().trim() !== "paid") {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Rating and review can be submitted only after the booking is paid.",
+      });
+    }
+
+    const roundedRating = Math.round(numericRating);
+    const reviewedAt = new Date();
+
+    await Booking.collection.updateOne(
+      { _id: booking._id },
+      {
+        $set: {
+          rating: roundedRating,
+          review: trimmedReview,
+          reviewedAt,
+          updatedAt: reviewedAt,
+        },
+      }
+    );
+
+    const updatedRaw = await Booking.collection.findOne({ _id: booking._id });
+    const normalizedBooking = normalizeBookingRecord(updatedRaw || booking);
+    const ratingSummary = await recalculateServiceRating(booking.serviceId);
+
+    res.status(200).json({
+      success: true,
+      message: "Rating and review submitted successfully",
+      data: normalizedBooking,
+      serviceRating: ratingSummary,
+    });
+  } catch (error) {
+    console.error("Error submitting booking review:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+}
+
+app.post(
+  "/api/bookings/:id/review",
+  verifyToken,
+  verifyCustomer,
+  submitCustomerBookingReview
+);
+app.patch(
+  "/api/bookings/:id",
+  verifyToken,
+  verifyCustomer,
+  submitCustomerBookingReview
+);
+
 // ==========================================
 // Technician Booking & Service Routes
 // ==========================================
 async function getTechnicianBookingsHandler(req, res) {
   try {
     const normalizedEmail = (req.user.email || "").toLowerCase().trim();
-    const rawBookings = await Booking.find({
-      $or: [
-        { technicianId: req.user.userId },
-        { technicianEmail: normalizedEmail },
-      ],
-    }).sort({ createdAt: -1 });
+    const rawBookings = await Booking.collection
+      .find({
+        $or: [
+          { technicianId: req.user.userId },
+          { technicianEmail: normalizedEmail },
+        ],
+      })
+      .sort({ createdAt: -1 })
+      .toArray();
     const bookings = await attachLatestTechnicianNamesToBookings(rawBookings);
 
     res.status(200).json({
@@ -1402,7 +1638,7 @@ app.patch(
       res.status(200).json({
         success: true,
         message: `Booking status updated to ${nextStatus}`,
-        data: booking,
+        data: normalizeBookingRecord(booking),
       });
     } catch (error) {
       console.error("Error updating booking status:", error);
@@ -1531,7 +1767,8 @@ app.get(
           ],
         }).sort({ createdAt: -1 }),
       ]);
-      const services = await attachLatestTechnicianNames(rawServices);
+      const withTech = await attachLatestTechnicianNames(rawServices);
+      const services = await attachRatingsToServices(withTech);
       const plan = normalizeUserPlan(dbUser?.plan);
 
       res.status(200).json({
@@ -1784,7 +2021,10 @@ app.get("/api/admin/services", verifyToken, verifyAdmin, async (req, res) => {
 
 app.get("/api/admin/bookings", verifyToken, verifyAdmin, async (req, res) => {
   try {
-    const rawBookings = await Booking.find({}).sort({ createdAt: -1 });
+    const rawBookings = await Booking.collection
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
     const bookings = await attachLatestTechnicianNamesToBookings(rawBookings);
 
     res.status(200).json({
