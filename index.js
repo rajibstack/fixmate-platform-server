@@ -15,6 +15,8 @@ const port = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || "fixmate_secret_key";
 const FREE_PLAN_SERVICE_LIMIT = 3;
 const PRO_PLAN_MONTHLY_PRICE = Number(process.env.PRO_PLAN_PRICE || 19);
+const DEFAULT_SERVICES_LIMIT = 8;
+const MAX_SERVICES_LIMIT = 50;
 
 let stripe = null;
 if (process.env.STRIPE_SECRET_KEY) {
@@ -1091,14 +1093,58 @@ app.post(
 );
 
 // ==========================================
-// Public Service Routes (Challenge 1)
+// Public Service Routes (Server-Side Pagination + Search, Filter, Sort)
 // ==========================================
 app.get("/api/services", async (req, res) => {
   try {
-    const { search, q, category, mode, sort } = req.query;
+    const { search, q, category, mode, sort, page, limit } = req.query;
     const andConditions = [
-      { $or: [{ status: "approved" }, { status: { $exists: false } }] },
-      { $or: [{ available: true }, { available: { $exists: false } }] },
+      {
+        $and: [
+          {
+            $or: [
+              {
+                status: {
+                  $regex: "^(approved|active|published)$",
+                  $options: "i",
+                },
+              },
+              { status: { $exists: false } },
+              { status: null },
+              { status: "" },
+            ],
+          },
+          {
+            $or: [
+              {
+                approvalStatus: {
+                  $regex: "^(approved|active|published)$",
+                  $options: "i",
+                },
+              },
+              { approvalStatus: { $exists: false } },
+              { approvalStatus: null },
+              { approvalStatus: "" },
+            ],
+          },
+        ],
+      },
+      {
+        $and: [
+          {
+            $or: [
+              { available: { $ne: false } },
+              { available: { $exists: false } },
+            ],
+          },
+          {
+            $or: [
+              { isAvailable: { $ne: false } },
+              { isAvailable: { $exists: false } },
+            ],
+          },
+        ],
+      },
     ];
 
     const trimmedCategory = (category || "").toString().trim();
@@ -1124,10 +1170,15 @@ app.get("/api/services", async (req, res) => {
     const trimmedMode = (mode || "").toString().trim();
     if (trimmedMode && trimmedMode.toLowerCase() !== "all") {
       andConditions.push({
-        mode: {
-          $regex: `^${escapeRegex(trimmedMode)}$`,
-          $options: "i",
-        },
+        $or: [
+          { mode: { $regex: `^${escapeRegex(trimmedMode)}$`, $options: "i" } },
+          {
+            serviceMode: {
+              $regex: `^${escapeRegex(trimmedMode)}$`,
+              $options: "i",
+            },
+          },
+        ],
       });
     }
 
@@ -1139,28 +1190,56 @@ app.get("/api/services", async (req, res) => {
           { title: { $regex: safePattern, $options: "i" } },
           { category: { $regex: safePattern, $options: "i" } },
           { technicianName: { $regex: safePattern, $options: "i" } },
+          { area: { $regex: safePattern, $options: "i" } },
+          { description: { $regex: safePattern, $options: "i" } },
         ],
       });
     }
 
-    let sortOption = { createdAt: -1 };
+    let sortOption = { createdAt: -1, _id: -1 };
     if (sort === "price-asc") {
-      sortOption = { price: 1, createdAt: -1 };
+      sortOption = { price: 1, createdAt: -1, _id: -1 };
     } else if (sort === "price-desc") {
-      sortOption = { price: -1, createdAt: -1 };
+      sortOption = { price: -1, createdAt: -1, _id: -1 };
     } else if (sort === "newest") {
-      sortOption = { createdAt: -1 };
+      sortOption = { createdAt: -1, _id: -1 };
     }
 
-    const rawServices = await Service.find({ $and: andConditions }).sort(
-      sortOption
-    );
+    const queryFilter = { $and: andConditions };
+
+    const parsedLimit = Number.parseInt(limit, 10);
+    const safeLimit =
+      Number.isFinite(parsedLimit) && parsedLimit > 0
+        ? Math.min(parsedLimit, MAX_SERVICES_LIMIT)
+        : DEFAULT_SERVICES_LIMIT;
+
+    const totalCount = await Service.countDocuments(queryFilter);
+    const totalPages = Math.max(1, Math.ceil(totalCount / safeLimit));
+
+    const parsedPage = Number.parseInt(page, 10);
+    const requestedPage =
+      Number.isFinite(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+    const currentPage = Math.min(requestedPage, totalPages);
+    const skipCount = (currentPage - 1) * safeLimit;
+
+    const rawServices = await Service.find(queryFilter)
+      .sort(sortOption)
+      .skip(skipCount)
+      .limit(safeLimit);
+
     const withTech = await attachLatestTechnicianNames(rawServices);
     const services = await attachRatingsToServices(withTech);
 
     res.status(200).json({
       success: true,
       count: services.length,
+      totalCount,
+      totalPages,
+      page: currentPage,
+      currentPage,
+      limit: safeLimit,
+      hasPrevPage: currentPage > 1,
+      hasNextPage: currentPage < totalPages,
       data: services,
     });
   } catch (error) {
@@ -1174,7 +1253,19 @@ app.get("/api/services", async (req, res) => {
 
 app.get("/api/services/:id", async (req, res) => {
   try {
-    const service = await Service.findById(req.params.id);
+    const rawId = String(req.params.id || "").trim();
+    let service = null;
+
+    if (/^[0-9a-fA-F]{24}$/.test(rawId)) {
+      service = await Service.findById(rawId);
+    }
+
+    if (!service) {
+      service = await Service.collection.findOne({
+        $or: [{ _id: rawId }, { id: rawId }, { slug: rawId }],
+      });
+    }
+
     if (!service) {
       return res.status(404).json({
         success: false,
@@ -1216,7 +1307,10 @@ app.get("/api/services/:id", async (req, res) => {
       reviews: [],
     };
 
-    const serviceObj = service.toObject();
+    const serviceObj =
+      typeof service.toObject === "function"
+        ? service.toObject()
+        : { ...service };
     serviceObj.technicianName = technicianSummary.name;
     serviceObj.technicianPlan = technicianSummary.plan;
     serviceObj.isVerifiedPro = technicianSummary.isVerifiedPro;
@@ -1235,12 +1329,6 @@ app.get("/api/services/:id", async (req, res) => {
     });
   } catch (error) {
     console.error("Error fetching service details:", error);
-    if (error?.name === "CastError") {
-      return res.status(404).json({
-        success: false,
-        message: "Service not found",
-      });
-    }
     res.status(500).json({
       success: false,
       message: "Internal Server Error",
