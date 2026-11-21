@@ -7,11 +7,23 @@ const { connectDB } = require("./config/db");
 const Service = require("./models/Service");
 const User = require("./models/User");
 const Booking = require("./models/Booking");
+const Payment = require("./models/Payment");
 const ContactMessage = require("./models/ContactMessage");
 
 const app = express();
 const port = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || "fixmate_secret_key";
+const FREE_PLAN_SERVICE_LIMIT = 3;
+const PRO_PLAN_MONTHLY_PRICE = Number(process.env.PRO_PLAN_PRICE || 19);
+
+let stripe = null;
+if (process.env.STRIPE_SECRET_KEY) {
+  try {
+    stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+  } catch (err) {
+    console.warn("Stripe SDK not initialized:", err.message);
+  }
+}
 
 const allowedOrigins = [
   "http://localhost:3000",
@@ -96,6 +108,48 @@ function escapeRegex(value = "") {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function normalizeUserPlan(plan) {
+  return String(plan || "free").toLowerCase().trim() === "pro" ? "pro" : "free";
+}
+
+function formatSafeUser(user) {
+  const plan = normalizeUserPlan(user?.plan);
+  return {
+    _id: user._id,
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    plan,
+    isVerifiedPro: user.role === "technician" && plan === "pro",
+    proActivatedAt: user.proActivatedAt || null,
+    avatar: user.avatar || "",
+    phone: user.phone || "",
+    area: user.area || "",
+    bio: user.bio || "",
+  };
+}
+
+async function findTechnicianUserRecord(record = {}) {
+  const orConditions = [];
+  if (record?.technicianId) {
+    orConditions.push({ _id: record.technicianId });
+  }
+  if (record?.technicianEmail) {
+    const cleanEmail = String(record.technicianEmail).toLowerCase().trim();
+    if (cleanEmail) {
+      orConditions.push({ email: cleanEmail });
+    }
+  }
+
+  if (orConditions.length === 0) {
+    return null;
+  }
+
+  return User.findOne({ $or: orConditions }).select(
+    "_id name email avatar area bio phone role plan"
+  );
+}
+
 async function fetchUsersByIdAndEmail(records = []) {
   const techIds = new Set();
   const techEmails = new Set();
@@ -122,7 +176,7 @@ async function fetchUsersByIdAndEmail(records = []) {
 
   if (orQuery.length > 0) {
     const techUsers = await User.find({ $or: orQuery }).select(
-      "_id name email avatar area phone"
+      "_id name email avatar area bio phone plan"
     );
     for (const u of techUsers) {
       usersById.set(String(u._id), u);
@@ -159,10 +213,14 @@ async function attachLatestTechnicianNames(services = []) {
       obj.technician?.name ||
       obj.technicianName ||
       "Verified Technician";
+    const techPlan = normalizeUserPlan(matchedUser?.plan || obj.technicianPlan);
+    const isVerifiedPro = techPlan === "pro";
 
     return {
       ...obj,
       technicianName: latestName,
+      technicianPlan: techPlan,
+      isVerifiedPro,
       technician: {
         ...(obj.technician && typeof obj.technician === "object"
           ? obj.technician
@@ -171,6 +229,10 @@ async function attachLatestTechnicianNames(services = []) {
         name: latestName,
         email: matchedUser?.email || obj.technicianEmail || "",
         avatar: matchedUser?.avatar || obj.technician?.avatar || "",
+        area: matchedUser?.area || obj.area || "",
+        bio: matchedUser?.bio || obj.technician?.bio || "",
+        plan: techPlan,
+        isVerifiedPro,
       },
     };
   });
@@ -201,10 +263,14 @@ async function attachLatestTechnicianNamesToBookings(bookings = []) {
       obj.technician?.name ||
       obj.technicianName ||
       "Technician";
+    const techPlan = normalizeUserPlan(matchedUser?.plan || obj.technicianPlan);
+    const isVerifiedPro = techPlan === "pro";
 
     return {
       ...obj,
       technicianName: latestName,
+      technicianPlan: techPlan,
+      isVerifiedPro,
       technician: {
         ...(obj.technician && typeof obj.technician === "object"
           ? obj.technician
@@ -214,6 +280,9 @@ async function attachLatestTechnicianNamesToBookings(bookings = []) {
         email: matchedUser?.email || obj.technicianEmail || "",
         phone: matchedUser?.phone || obj.technicianPhone || "",
         area: matchedUser?.area || obj.technicianArea || "",
+        bio: matchedUser?.bio || obj.technician?.bio || "",
+        plan: techPlan,
+        isVerifiedPro,
       },
     };
   });
@@ -304,6 +373,7 @@ app.post("/api/auth/signup", async (req, res) => {
       email: normalizedEmail,
       password: hashedPassword,
       role: assignedRole,
+      plan: "free",
     });
 
     const token = jwt.sign(
@@ -316,12 +386,7 @@ app.post("/api/auth/signup", async (req, res) => {
       success: true,
       message: "Account created successfully",
       token,
-      user: {
-        _id: newUser._id,
-        name: newUser.name,
-        email: newUser.email,
-        role: newUser.role,
-      },
+      user: formatSafeUser(newUser),
     });
   } catch (error) {
     console.error("Signup error:", error);
@@ -377,16 +442,7 @@ app.post("/api/auth/login", async (req, res) => {
       success: true,
       message: "Logged in successfully",
       token,
-      user: {
-        _id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        avatar: user.avatar || "",
-        phone: user.phone || "",
-        area: user.area || "",
-        bio: user.bio || "",
-      },
+      user: formatSafeUser(user),
     });
   } catch (error) {
     console.error("Login error:", error);
@@ -436,6 +492,7 @@ app.post("/api/auth/google", async (req, res) => {
         googleId: sub,
         avatar: picture || "",
         role: assignedRole,
+        plan: "free",
       });
     }
 
@@ -449,16 +506,7 @@ app.post("/api/auth/google", async (req, res) => {
       success: true,
       message: "Signed in with Google successfully",
       token,
-      user: {
-        _id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        avatar: user.avatar || "",
-        phone: user.phone || "",
-        area: user.area || "",
-        bio: user.bio || "",
-      },
+      user: formatSafeUser(user),
     });
   } catch (error) {
     console.error("Google auth error:", error);
@@ -481,7 +529,7 @@ app.get("/api/auth/me", verifyToken, async (req, res) => {
 
     res.status(200).json({
       success: true,
-      user,
+      user: formatSafeUser(user),
     });
   } catch (error) {
     console.error("Get profile error:", error);
@@ -533,21 +581,10 @@ async function updateUserProfileHandler(req, res) {
       Booking.updateMany(ownerFilter, { $set: { technicianName: trimmedName } }),
     ]);
 
-    const safeUser = {
-      _id: user._id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      avatar: user.avatar || "",
-      phone: user.phone || "",
-      area: user.area || "",
-      bio: user.bio || "",
-    };
-
     res.status(200).json({
       success: true,
       message: "Profile updated successfully",
-      user: safeUser,
+      user: formatSafeUser(user),
     });
   } catch (error) {
     console.error("Update profile error:", error);
@@ -560,6 +597,267 @@ async function updateUserProfileHandler(req, res) {
 
 app.patch("/api/users/profile", verifyToken, updateUserProfileHandler);
 app.patch("/api/auth/profile", verifyToken, updateUserProfileHandler);
+
+// ==========================================
+// Technician Pro Plan (Stripe Subscription)
+// ==========================================
+async function activateTechnicianProPlan(user, meta = {}) {
+  const transactionId =
+    meta.transactionId ||
+    `sub_${Date.now().toString(36).toUpperCase()}${Math.random()
+      .toString(36)
+      .substring(2, 6)
+      .toUpperCase()}`;
+
+  if (meta.stripeSessionId) {
+    const existingPayment = await Payment.findOne({
+      stripeSessionId: meta.stripeSessionId,
+      status: "paid",
+    });
+    if (existingPayment) {
+      return { user, payment: existingPayment, alreadyRecorded: true };
+    }
+  }
+
+  user.plan = "pro";
+  user.proActivatedAt = user.proActivatedAt || new Date();
+  if (meta.stripeCustomerId) user.stripeCustomerId = meta.stripeCustomerId;
+  if (meta.stripeSubscriptionId) {
+    user.stripeSubscriptionId = meta.stripeSubscriptionId;
+  }
+  await user.save();
+
+  const payment = await Payment.create({
+    type: "subscription",
+    plan: "pro",
+    serviceTitle: "Pro Technician Plan (Monthly)",
+    userId: user._id,
+    userName: user.name,
+    userEmail: user.email,
+    userRole: user.role,
+    amount: Number(meta.amount ?? PRO_PLAN_MONTHLY_PRICE),
+    currency: "usd",
+    provider: "stripe",
+    transactionId,
+    stripeSessionId: meta.stripeSessionId || "",
+    stripeSubscriptionId:
+      meta.stripeSubscriptionId || user.stripeSubscriptionId || "",
+    status: "paid",
+    paidAt: new Date(),
+  });
+
+  return { user, payment, alreadyRecorded: false };
+}
+
+app.get(
+  "/api/subscriptions/pro/status",
+  verifyToken,
+  verifyTechnician,
+  async (req, res) => {
+    try {
+      const user = await User.findById(req.user.userId).select("-password");
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: "Technician not found",
+        });
+      }
+
+      const normalizedEmail = String(user.email || "").toLowerCase().trim();
+      const serviceCount = await Service.countDocuments({
+        $or: [
+          { technicianId: user._id },
+          ...(normalizedEmail ? [{ technicianEmail: normalizedEmail }] : []),
+        ],
+      });
+
+      const plan = normalizeUserPlan(user.plan);
+      const isPro = plan === "pro";
+
+      res.status(200).json({
+        success: true,
+        plan,
+        isVerifiedPro: isPro,
+        serviceCount,
+        serviceLimit: isPro ? null : FREE_PLAN_SERVICE_LIMIT,
+        remainingFreeSlots: isPro
+          ? null
+          : Math.max(0, FREE_PLAN_SERVICE_LIMIT - serviceCount),
+        price: PRO_PLAN_MONTHLY_PRICE,
+        proActivatedAt: user.proActivatedAt || null,
+        user: formatSafeUser(user),
+      });
+    } catch (error) {
+      console.error("Error fetching Pro subscription status:", error);
+      res.status(500).json({
+        success: false,
+        message: "Internal Server Error",
+      });
+    }
+  }
+);
+
+app.post(
+  "/api/subscriptions/pro/checkout-session",
+  verifyToken,
+  verifyTechnician,
+  async (req, res) => {
+    try {
+      const user = await User.findById(req.user.userId);
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: "Technician account not found",
+        });
+      }
+
+      if (normalizeUserPlan(user.plan) === "pro") {
+        return res.status(200).json({
+          success: true,
+          alreadyPro: true,
+          message: "You are already subscribed to the Pro Technician Plan.",
+          user: formatSafeUser(user),
+        });
+      }
+
+      const clientBaseUrl = (
+        req.body?.returnUrl ||
+        process.env.CLIENT_URL ||
+        "http://localhost:3000"
+      ).replace(/\/+$/, "");
+
+      if (stripe && process.env.STRIPE_PRO_PRICE_ID) {
+        const session = await stripe.checkout.sessions.create({
+          mode: "subscription",
+          payment_method_types: ["card"],
+          customer_email: user.email,
+          line_items: [
+            {
+              price: process.env.STRIPE_PRO_PRICE_ID,
+              quantity: 1,
+            },
+          ],
+          metadata: {
+            userId: String(user._id),
+            userEmail: user.email,
+            plan: "pro",
+          },
+          success_url: `${clientBaseUrl}/dashboard/technician/services?upgrade=success&session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${clientBaseUrl}/dashboard/technician/services?upgrade=cancelled`,
+        });
+
+        return res.status(200).json({
+          success: true,
+          mode: "stripe",
+          sessionId: session.id,
+          url: session.url,
+        });
+      }
+
+      const { payment } = await activateTechnicianProPlan(user, {
+        amount: PRO_PLAN_MONTHLY_PRICE,
+      });
+
+      return res.status(200).json({
+        success: true,
+        mode: "direct",
+        message:
+          "Upgraded to Pro Technician Plan! Unlimited services & Verified Pro badge unlocked.",
+        transactionId: payment.transactionId,
+        payment,
+        user: formatSafeUser(user),
+      });
+    } catch (error) {
+      console.error("Pro checkout session error:", error);
+      res.status(500).json({
+        success: false,
+        message: error?.message || "Failed to initiate Pro subscription.",
+      });
+    }
+  }
+);
+
+app.post(
+  "/api/subscriptions/pro/confirm",
+  verifyToken,
+  verifyTechnician,
+  async (req, res) => {
+    try {
+      const { sessionId } = req.body || {};
+      const user = await User.findById(req.user.userId);
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: "Technician account not found",
+        });
+      }
+
+      if (stripe && sessionId) {
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
+        if (
+          session.payment_status !== "paid" &&
+          session.status !== "complete"
+        ) {
+          return res.status(400).json({
+            success: false,
+            message: "Stripe subscription payment is not completed yet.",
+          });
+        }
+
+        const amountTotal = session.amount_total
+          ? Number(session.amount_total) / 100
+          : PRO_PLAN_MONTHLY_PRICE;
+
+        const { payment } = await activateTechnicianProPlan(user, {
+          amount: amountTotal,
+          stripeSessionId: session.id,
+          stripeCustomerId:
+            typeof session.customer === "string" ? session.customer : "",
+          stripeSubscriptionId:
+            typeof session.subscription === "string"
+              ? session.subscription
+              : "",
+          transactionId:
+            typeof session.subscription === "string"
+              ? session.subscription
+              : session.id,
+        });
+
+        return res.status(200).json({
+          success: true,
+          message: "Pro Technician Plan activated successfully.",
+          payment,
+          user: formatSafeUser(user),
+        });
+      }
+
+      if (normalizeUserPlan(user.plan) === "pro") {
+        return res.status(200).json({
+          success: true,
+          message: "Pro Technician Plan is active.",
+          user: formatSafeUser(user),
+        });
+      }
+
+      const { payment } = await activateTechnicianProPlan(user, {
+        amount: PRO_PLAN_MONTHLY_PRICE,
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: "Pro Technician Plan activated successfully.",
+        payment,
+        user: formatSafeUser(user),
+      });
+    } catch (error) {
+      console.error("Confirm Pro subscription error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Internal Server Error",
+      });
+    }
+  }
+);
 
 // ==========================================
 // Public Service Routes (Challenge 1)
@@ -660,28 +958,31 @@ app.get("/api/services/:id", async (req, res) => {
       area: service.area || "",
       bio: "",
       phone: "",
+      plan: "free",
+      isVerifiedPro: false,
     };
 
-    if (service.technicianEmail) {
-      const techUser = await User.findOne({
-        email: service.technicianEmail.toLowerCase().trim(),
-      }).select("name email avatar area bio phone role");
-
-      if (techUser) {
-        technicianSummary = {
-          _id: techUser._id,
-          name: techUser.name || service.technicianName || "Verified Technician",
-          email: techUser.email,
-          avatar: techUser.avatar || "",
-          area: techUser.area || service.area || "",
-          bio: techUser.bio || "",
-          phone: techUser.phone || "",
-        };
-      }
+    const techUser = await findTechnicianUserRecord(service);
+    if (techUser) {
+      const techPlan = normalizeUserPlan(techUser.plan);
+      technicianSummary = {
+        _id: techUser._id,
+        name: techUser.name || service.technicianName || "Verified Technician",
+        email: techUser.email || service.technicianEmail || "",
+        avatar: techUser.avatar || "",
+        area: techUser.area || service.area || "",
+        bio: techUser.bio || "",
+        phone: techUser.phone || "",
+        plan: techPlan,
+        isVerifiedPro: techPlan === "pro",
+      };
     }
 
     const serviceObj = service.toObject();
     serviceObj.technicianName = technicianSummary.name;
+    serviceObj.technicianPlan = technicianSummary.plan;
+    serviceObj.isVerifiedPro = technicianSummary.isVerifiedPro;
+    serviceObj.technician = technicianSummary;
 
     res.status(200).json({
       success: true,
@@ -778,11 +1079,7 @@ app.post("/api/bookings", verifyToken, verifyCustomer, async (req, res) => {
       });
     }
 
-    const techUser = service.technicianEmail
-      ? await User.findOne({
-          email: service.technicianEmail.toLowerCase().trim(),
-        }).select("_id name email phone area")
-      : null;
+    const techUser = await findTechnicianUserRecord(service);
 
     const newBooking = await Booking.create({
       serviceId: service._id,
@@ -963,6 +1260,23 @@ async function processCustomerBookingPayment(req, res) {
     booking.paidAt = new Date();
     await booking.save();
 
+    await Payment.create({
+      type: "booking",
+      plan: "",
+      bookingId: booking._id,
+      serviceTitle: booking.serviceTitle || "Repair Service",
+      userId: booking.customerId || req.user.userId,
+      userName: booking.customerName || "Customer",
+      userEmail: booking.customerEmail || normalizedEmail,
+      userRole: "customer",
+      amount,
+      currency: "usd",
+      provider: "stripe",
+      transactionId,
+      status: "paid",
+      paidAt: booking.paidAt,
+    });
+
     res.status(200).json({
       success: true,
       message: "Payment completed successfully",
@@ -1132,6 +1446,27 @@ async function createTechnicianServiceHandler(req, res) {
     const safeName =
       dbUser?.name || technicianName?.trim() || req.user.email.split("@")[0];
     const safeEmail = (dbUser?.email || req.user.email).toLowerCase().trim();
+    const currentPlan = normalizeUserPlan(dbUser?.plan);
+
+    if (currentPlan !== "pro") {
+      const existingServiceCount = await Service.countDocuments({
+        $or: [
+          { technicianId: req.user.userId },
+          ...(safeEmail ? [{ technicianEmail: safeEmail }] : []),
+        ],
+      });
+
+      if (existingServiceCount >= FREE_PLAN_SERVICE_LIMIT) {
+        return res.status(403).json({
+          success: false,
+          code: "FREE_PLAN_LIMIT_REACHED",
+          plan: "free",
+          limit: FREE_PLAN_SERVICE_LIMIT,
+          currentCount: existingServiceCount,
+          message: `Free technicians can list up to ${FREE_PLAN_SERVICE_LIMIT} services. Upgrade to the Pro Technician Plan for unlimited services and a Verified Pro badge.`,
+        });
+      }
+    }
 
     const newService = await Service.create({
       title: String(title).trim(),
@@ -1152,7 +1487,11 @@ async function createTechnicianServiceHandler(req, res) {
     res.status(201).json({
       success: true,
       message: "Service submitted for review.",
-      data: newService,
+      data: {
+        ...newService.toObject(),
+        technicianPlan: currentPlan,
+        isVerifiedPro: currentPlan === "pro",
+      },
     });
   } catch (error) {
     console.error("Error creating technician service:", error);
@@ -1183,17 +1522,24 @@ app.get(
   async (req, res) => {
     try {
       const normalizedEmail = (req.user.email || "").toLowerCase().trim();
-      const rawServices = await Service.find({
-        $or: [
-          { technicianId: req.user.userId },
-          { technicianEmail: normalizedEmail },
-        ],
-      }).sort({ createdAt: -1 });
+      const [dbUser, rawServices] = await Promise.all([
+        User.findById(req.user.userId).select("plan"),
+        Service.find({
+          $or: [
+            { technicianId: req.user.userId },
+            { technicianEmail: normalizedEmail },
+          ],
+        }).sort({ createdAt: -1 }),
+      ]);
       const services = await attachLatestTechnicianNames(rawServices);
+      const plan = normalizeUserPlan(dbUser?.plan);
 
       res.status(200).json({
         success: true,
         count: services.length,
+        plan,
+        isVerifiedPro: plan === "pro",
+        serviceLimit: plan === "pro" ? null : FREE_PLAN_SERVICE_LIMIT,
         data: services,
       });
     } catch (error) {
@@ -1353,7 +1699,7 @@ app.get("/api/admin/users", verifyToken, verifyAdmin, async (req, res) => {
     res.status(200).json({
       success: true,
       count: users.length,
-      data: users,
+      data: users.map((u) => formatSafeUser(u)),
     });
   } catch (error) {
     console.error("Error fetching users:", error);
@@ -1405,7 +1751,7 @@ app.patch(
       res.status(200).json({
         success: true,
         message: "User role updated successfully",
-        data: targetUser,
+        data: formatSafeUser(targetUser),
       });
     } catch (error) {
       console.error("Error updating user role:", error);
@@ -1457,29 +1803,76 @@ app.get("/api/admin/bookings", verifyToken, verifyAdmin, async (req, res) => {
 
 app.get("/api/admin/payments", verifyToken, verifyAdmin, async (req, res) => {
   try {
-    const payments = await Booking.find({ paymentStatus: "paid" }).sort({
-      paidAt: -1,
-      updatedAt: -1,
+    const [recordedPayments, paidBookings] = await Promise.all([
+      Payment.find({ status: "paid" }).sort({ paidAt: -1, createdAt: -1 }),
+      Booking.find({ paymentStatus: "paid" }).sort({
+        paidAt: -1,
+        updatedAt: -1,
+      }),
+    ]);
+
+    const recordedBookingIds = new Set(
+      recordedPayments
+        .filter((p) => p.bookingId)
+        .map((p) => String(p.bookingId))
+    );
+
+    const legacyBookingPayments = paidBookings
+      .filter((b) => !recordedBookingIds.has(String(b._id)))
+      .map((b) => ({
+        _id: b._id,
+        type: "booking",
+        plan: "",
+        bookingId: b._id,
+        serviceTitle: b.serviceTitle || "Repair Service",
+        userId: b.customerId || null,
+        userName: b.customerName || "Customer",
+        userEmail: b.customerEmail || "",
+        customerName: b.customerName || "Customer",
+        customerEmail: b.customerEmail || "",
+        technicianName: b.technicianName || "Technician",
+        amount: Number(
+          b.paidAmount || b.finalAmount || b.totalPrice || b.startingPrice || 0
+        ),
+        paidAmount: Number(
+          b.paidAmount || b.finalAmount || b.totalPrice || b.startingPrice || 0
+        ),
+        transactionId: b.transactionId || "",
+        paymentStatus: "paid",
+        status: "paid",
+        paidAt: b.paidAt || b.updatedAt,
+      }));
+
+    const normalizedRecorded = recordedPayments.map((p) => {
+      const obj = p.toObject();
+      return {
+        ...obj,
+        customerName: obj.userName,
+        customerEmail: obj.userEmail,
+        paidAmount: obj.amount,
+        paymentStatus: obj.status,
+      };
     });
 
-    const totalRevenue = payments.reduce(
-      (sum, item) =>
-        sum +
-        Number(
-          item.paidAmount ||
-            item.finalAmount ||
-            item.totalPrice ||
-            item.startingPrice ||
-            0
-        ),
+    const allPayments = [...normalizedRecorded, ...legacyBookingPayments].sort(
+      (a, b) => new Date(b.paidAt || 0) - new Date(a.paidAt || 0)
+    );
+
+    const totalRevenue = allPayments.reduce(
+      (sum, item) => sum + Number(item.amount || item.paidAmount || 0),
       0
     );
 
+    const subscriptionRevenue = normalizedRecorded
+      .filter((p) => p.type === "subscription")
+      .reduce((sum, item) => sum + Number(item.amount || 0), 0);
+
     res.status(200).json({
       success: true,
-      count: payments.length,
+      count: allPayments.length,
       totalRevenue,
-      data: payments,
+      subscriptionRevenue,
+      data: allPayments,
     });
   } catch (error) {
     console.error("Error fetching admin payments:", error);

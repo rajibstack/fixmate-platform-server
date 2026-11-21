@@ -45,6 +45,23 @@ const userSchema = new mongoose.Schema(
       enum: ["customer", "technician", "admin"],
       default: "customer",
     },
+    plan: {
+      type: String,
+      enum: ["free", "pro"],
+      default: "free",
+    },
+    stripeCustomerId: {
+      type: String,
+      default: "",
+    },
+    stripeSubscriptionId: {
+      type: String,
+      default: "",
+    },
+    proActivatedAt: {
+      type: Date,
+      default: null,
+    },
     isActive: {
       type: Boolean,
       default: true,
