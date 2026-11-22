@@ -2647,3 +2647,43 @@ async function startServer() {
 }
 
 startServer();
+
+const DEMO_USER_EMAILS = [
+  "arif.customer@fixmate.app",
+  "tariq.tech@fixmate.app",
+  "nadia.tech@fixmate.app",
+  "admin@fixmate.app",
+];
+
+app.get("/api/auth/demo-users", async (req, res) => {
+  try {
+    const dbDemoUsers = await User.find({
+      email: { $in: DEMO_USER_EMAILS },
+    }).select("name email role avatar");
+
+    const userMap = new Map(
+      dbDemoUsers.map((u) => [String(u.email || "").toLowerCase().trim(), u])
+    );
+
+    const data = DEMO_USER_EMAILS.map((email) => {
+      const found = userMap.get(email);
+      return {
+        email,
+        name: found?.name || "",
+        role: found?.role || "",
+        avatar: found?.avatar || "",
+      };
+    });
+
+    res.status(200).json({
+      success: true,
+      data,
+    });
+  } catch (error) {
+    console.error("Error fetching demo users:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+});
