@@ -2391,6 +2391,69 @@ app.patch(
   updateServiceApprovalHandler
 );
 
+// ==========================================
+// Public Contact Route & Admin Messages Routes
+// ==========================================
+app.post("/api/contact", async (req, res) => {
+  try {
+    const { name, email, phone, contactNumber, topic, message } =
+      req.body || {};
+    const resolvedPhone = String(phone || contactNumber || "").trim();
+
+    if (
+      !String(name || "").trim() ||
+      !String(email || "").trim() ||
+      !resolvedPhone ||
+      !String(message || "").trim()
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Name, email address, contact number, and message are required.",
+      });
+    }
+
+    const cleanedPhone = resolvedPhone.replace(/[\s()-]/g, "");
+    if (!/^\+?\d{7,15}$/.test(cleanedPhone)) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide a valid contact number.",
+      });
+    }
+
+    const trimmedMessage = String(message).trim();
+    if (trimmedMessage.length < 15) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Please write at least 15 characters so we can assist you properly.",
+      });
+    }
+
+    const createdMessage = await ContactMessage.create({
+      name: String(name).trim(),
+      email: String(email).toLowerCase().trim(),
+      phone: resolvedPhone,
+      contactNumber: resolvedPhone,
+      topic: String(topic || "General Inquiry").trim(),
+      message: trimmedMessage,
+      status: "unread",
+    });
+
+    res.status(201).json({
+      success: true,
+      message: "Message sent successfully.",
+      data: createdMessage,
+    });
+  } catch (error) {
+    console.error("Error creating contact message:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+});
+
 app.get("/api/admin/messages", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const messages = await ContactMessage.find({}).sort({ createdAt: -1 });
@@ -2443,6 +2506,34 @@ app.patch(
       });
     } catch (error) {
       console.error("Error updating message status:", error);
+      res.status(500).json({
+        success: false,
+        message: "Internal Server Error",
+      });
+    }
+  }
+);
+
+app.delete(
+  "/api/admin/messages/:id",
+  verifyToken,
+  verifyAdmin,
+  async (req, res) => {
+    try {
+      const deleted = await ContactMessage.findByIdAndDelete(req.params.id);
+      if (!deleted) {
+        return res.status(404).json({
+          success: false,
+          message: "Message not found",
+        });
+      }
+
+      res.status(200).json({
+        success: true,
+        message: "Message deleted successfully",
+      });
+    } catch (error) {
+      console.error("Error deleting contact message:", error);
       res.status(500).json({
         success: false,
         message: "Internal Server Error",
