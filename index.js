@@ -48,9 +48,6 @@ app.use(
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
-// ==========================================
-// Auth & Role Middlewares (Challenge 2)
-// ==========================================
 const verifyToken = (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -271,6 +268,43 @@ function normalizeBookingRecord(booking) {
   };
 }
 
+async function mapCustomersByBookingRecords(records = []) {
+  const customerIds = new Set();
+  const customerEmails = new Set();
+
+  for (const r of records) {
+    if (r?.customerId) customerIds.add(String(r.customerId));
+    if (r?.customerEmail) {
+      customerEmails.add(String(r.customerEmail).toLowerCase().trim());
+    }
+  }
+
+  const orConditions = [];
+  if (customerIds.size > 0) {
+    orConditions.push({ _id: { $in: Array.from(customerIds) } });
+  }
+  if (customerEmails.size > 0) {
+    orConditions.push({ email: { $in: Array.from(customerEmails) } });
+  }
+
+  const usersById = new Map();
+  const usersByEmail = new Map();
+
+  if (orConditions.length > 0) {
+    const customers = await User.find({ $or: orConditions }).select(
+      "_id name email avatar"
+    );
+    for (const u of customers) {
+      usersById.set(String(u._id), u);
+      if (u.email) {
+        usersByEmail.set(String(u.email).toLowerCase().trim(), u);
+      }
+    }
+  }
+
+  return { usersById, usersByEmail };
+}
+
 async function recalculateServiceRating(serviceId) {
   if (!serviceId) return null;
 
@@ -283,6 +317,9 @@ async function recalculateServiceRating(serviceId) {
     .toArray();
 
   const reviewedBookings = rawReviewedBookings.map(normalizeBookingRecord);
+  const { usersById, usersByEmail } =
+    await mapCustomersByBookingRecords(reviewedBookings);
+
   const reviewCount = reviewedBookings.length;
   const sum = reviewedBookings.reduce(
     (acc, item) => acc + Number(item.rating || 0),
@@ -291,13 +328,27 @@ async function recalculateServiceRating(serviceId) {
   const averageRating =
     reviewCount > 0 ? Number((sum / reviewCount).toFixed(1)) : 0;
 
-  const reviews = reviewedBookings.map((item) => ({
-    _id: item._id,
-    rating: Number(item.rating),
-    review: String(item.review || "").trim(),
-    customerName: item.customerName || "Customer",
-    reviewedAt: item.reviewedAt || item.updatedAt || item.createdAt,
-  }));
+  const reviews = reviewedBookings.map((item) => {
+    const matchedCustomer =
+      (item.customerId && usersById.get(String(item.customerId))) ||
+      (item.customerEmail &&
+        usersByEmail.get(String(item.customerEmail).toLowerCase().trim())) ||
+      null;
+
+    const customerImage =
+      matchedCustomer?.avatar || item.customerImage || item.customerAvatar || "";
+
+    return {
+      _id: item._id,
+      rating: Number(item.rating),
+      review: String(item.review || "").trim(),
+      customerName:
+        matchedCustomer?.name || item.customerName || "Customer",
+      customerImage,
+      customerAvatar: customerImage,
+      reviewedAt: item.reviewedAt || item.updatedAt || item.createdAt,
+    };
+  });
 
   await Service.findByIdAndUpdate(serviceId, {
     $set: {
@@ -521,9 +572,6 @@ async function attachLatestTechnicianNamesToBookings(bookings = []) {
   });
 }
 
-// ==========================================
-// Health / Root Route
-// ==========================================
 app.get("/", (req, res) => {
   res.send(`
     <!DOCTYPE html>
@@ -574,9 +622,6 @@ app.get("/", (req, res) => {
   `);
 });
 
-// ==========================================
-// Auth & User Profile Routes
-// ==========================================
 app.post("/api/auth/signup", async (req, res) => {
   try {
     const { name, email, password, role } = req.body;
@@ -831,9 +876,6 @@ async function updateUserProfileHandler(req, res) {
 app.patch("/api/users/profile", verifyToken, updateUserProfileHandler);
 app.patch("/api/auth/profile", verifyToken, updateUserProfileHandler);
 
-// ==========================================
-// Technician Pro Plan (Stripe Subscription)
-// ==========================================
 async function activateTechnicianProPlan(user, meta = {}) {
   const transactionId =
     meta.transactionId ||
@@ -1092,9 +1134,6 @@ app.post(
   }
 );
 
-// ==========================================
-// Public Service Routes (Server-Side Pagination + Search, Filter, Sort)
-// ==========================================
 app.get("/api/services", async (req, res) => {
   try {
     const { search, q, category, mode, sort, page, limit } = req.query;
@@ -1336,9 +1375,6 @@ app.get("/api/services/:id", async (req, res) => {
   }
 });
 
-// ==========================================
-// Customer Booking, Payment & Review Routes
-// ==========================================
 app.post("/api/bookings", verifyToken, verifyCustomer, async (req, res) => {
   try {
     const { serviceId, phone, address, preferredDate, problemDescription } =
@@ -1755,9 +1791,6 @@ app.patch(
   submitCustomerBookingReview
 );
 
-// ==========================================
-// Technician Booking & Service Routes
-// ==========================================
 async function getTechnicianBookingsHandler(req, res) {
   try {
     const normalizedEmail = (req.user.email || "").toLowerCase().trim();
@@ -2144,9 +2177,6 @@ app.delete(
   deleteTechnicianServiceHandler
 );
 
-// ==========================================
-// Admin Routes
-// ==========================================
 app.get("/api/admin/users", verifyToken, verifyAdmin, async (req, res) => {
   try {
     const users = await User.find({}).select("-password").sort({ createdAt: -1 });
@@ -2391,9 +2421,6 @@ app.patch(
   updateServiceApprovalHandler
 );
 
-// ==========================================
-// Public Contact Route & Admin Messages Routes
-// ==========================================
 app.post("/api/contact", async (req, res) => {
   try {
     const { name, email, phone, contactNumber, topic, message } =
@@ -2552,38 +2579,8 @@ app.get("/api/reviews", async (req, res) => {
       .limit(30)
       .toArray();
 
-    const customerIds = new Set();
-    const customerEmails = new Set();
-
-    for (const b of rawReviewedBookings) {
-      if (b?.customerId) customerIds.add(String(b.customerId));
-      if (b?.customerEmail) {
-        customerEmails.add(String(b.customerEmail).toLowerCase().trim());
-      }
-    }
-
-    const orConditions = [];
-    if (customerIds.size > 0) {
-      orConditions.push({ _id: { $in: Array.from(customerIds) } });
-    }
-    if (customerEmails.size > 0) {
-      orConditions.push({ email: { $in: Array.from(customerEmails) } });
-    }
-
-    const usersById = new Map();
-    const usersByEmail = new Map();
-
-    if (orConditions.length > 0) {
-      const customers = await User.find({ $or: orConditions }).select(
-        "_id name email avatar"
-      );
-      for (const u of customers) {
-        usersById.set(String(u._id), u);
-        if (u.email) {
-          usersByEmail.set(String(u.email).toLowerCase().trim(), u);
-        }
-      }
-    }
+    const { usersById, usersByEmail } =
+      await mapCustomersByBookingRecords(rawReviewedBookings);
 
     const reviews = rawReviewedBookings
       .map((b) => {
