@@ -2451,6 +2451,97 @@ app.patch(
   }
 );
 
+app.get("/api/reviews", async (req, res) => {
+  try {
+    const rawReviewedBookings = await Booking.collection
+      .find({
+        rating: { $gte: 1, $lte: 5 },
+      })
+      .sort({ reviewedAt: -1, updatedAt: -1, createdAt: -1 })
+      .limit(30)
+      .toArray();
+
+    const customerIds = new Set();
+    const customerEmails = new Set();
+
+    for (const b of rawReviewedBookings) {
+      if (b?.customerId) customerIds.add(String(b.customerId));
+      if (b?.customerEmail) {
+        customerEmails.add(String(b.customerEmail).toLowerCase().trim());
+      }
+    }
+
+    const orConditions = [];
+    if (customerIds.size > 0) {
+      orConditions.push({ _id: { $in: Array.from(customerIds) } });
+    }
+    if (customerEmails.size > 0) {
+      orConditions.push({ email: { $in: Array.from(customerEmails) } });
+    }
+
+    const usersById = new Map();
+    const usersByEmail = new Map();
+
+    if (orConditions.length > 0) {
+      const customers = await User.find({ $or: orConditions }).select(
+        "_id name email avatar"
+      );
+      for (const u of customers) {
+        usersById.set(String(u._id), u);
+        if (u.email) {
+          usersByEmail.set(String(u.email).toLowerCase().trim(), u);
+        }
+      }
+    }
+
+    const reviews = rawReviewedBookings
+      .map((b) => {
+        const norm = normalizeBookingRecord(b);
+        const matchedUser =
+          (norm.customerId && usersById.get(String(norm.customerId))) ||
+          (norm.customerEmail &&
+            usersByEmail.get(String(norm.customerEmail).toLowerCase().trim())) ||
+          null;
+
+        const hasValidComment = Boolean(String(norm.review || "").trim());
+        if (!hasValidComment) return null;
+
+        const isEdited = Boolean(
+          norm.reviewedAt &&
+            norm.createdAt &&
+            new Date(norm.reviewedAt).getTime() >
+              new Date(norm.createdAt).getTime() + 2000
+        );
+
+        return {
+          _id: norm._id,
+          customerName:
+            matchedUser?.name || norm.customerName || "Verified Customer",
+          customerImage: matchedUser?.avatar || norm.customerImage || "",
+          rating: Number(norm.rating),
+          comment: String(norm.review).trim(),
+          serviceTitle: norm.serviceTitle || "Repair Service",
+          createdAt: norm.createdAt || null,
+          updatedAt: norm.reviewedAt || norm.updatedAt || norm.createdAt || null,
+          isEdited,
+        };
+      })
+      .filter(Boolean);
+
+    res.status(200).json({
+      success: true,
+      count: reviews.length,
+      data: reviews,
+    });
+  } catch (error) {
+    console.error("Error fetching public reviews:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal Server Error",
+    });
+  }
+});
+
 async function startServer() {
   try {
     await connectDB();
