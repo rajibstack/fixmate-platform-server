@@ -1,7 +1,6 @@
 <div align="center">
 
-# ⚙️ FixMate Server
-
+# ⚙️ FixMate Platform Server
 ### Backend REST API for On-Demand Device & Home Appliance Repair Platform
 
 <p align="center">
@@ -22,65 +21,71 @@
 
 ## 📌 Project Name & Purpose
 
-- **Project Name:** **FixMate Server**
-- **Purpose:** FixMate Server is the backend REST API powering the **FixMate** on-demand device and home appliance repair service platform. It manages authentication (Email/Password & Google OAuth), role-based access control (**Customer**, **Technician**, **Admin**), service listings with pagination and filtering, booking lifecycle tracking, customer reviews with dynamic avatars, technician Pro plan upgrades, Stripe payments, and contact/admin moderation workflows for the Next.js client application.
+* **Project Name:** **FixMate Platform Server**
+* **Purpose:** FixMate Platform Server is the backend REST API powering the **FixMate** on-demand device and home appliance repair service platform. It handles authentication (Email/Password & Google OAuth), role-based access control (**Customer**, **Technician**, **Admin**), service listings with pagination, search, filtering, and sorting, booking status history tracking, customer reviews with dynamic profile avatars, technician Pro plan upgrades, Stripe payments, database seeding, and admin/contact workflows for the Next.js client application.
 
 ---
 
 ## 🌐 Live URL
 
-- **Server Base URL:** `https://your-fixmate-server-url.vercel.app` _(replace with your live deployment URL; local default: `http://localhost:5000`)_
+* **Server Base URL:** `https://your-fixmate-server-url.vercel.app` *(replace with your live deployment URL; local default: `http://localhost:5000`)*
 
 ---
 
-## 🔑 Admin Credentials
+## 🔐 Admin & Demo Credentials
 
-> ⚠️ **Note:** Replace `<YOUR_ADMIN_PASSWORD>` with your actual configured password before publishing or sharing publicly.
+Demo accounts for **Admin**, **Technician**, and **Customer** roles are pre-configured for convenient testing and quick selection on the **Sign In** page.
 
-- **Email:** `admin@fixmate.app`
-- **Password:** `<YOUR_ADMIN_PASSWORD>`
-- **Role:** `admin`
+* **Admin Account**
+* **Demo Roles on Sign In Page:** Quick-fill demo credentials are configured on the client Sign In page for **Admin**, **Technician**, and **Customer** roles so reviewers and testers can sign in and explore each role's dashboard and workflows directly.
 
 ---
 
 ## ✨ Key Features
 
-- **🔐 Authentication & Role-Based Access Control (RBAC):** Supports email/password signup and login with `bcryptjs` password hashing, Google OAuth token verification (`/api/auth/google`), JWT bearer token authentication, and role middlewares (`customer`, `technician`, `admin`).
-- **🛠️ Repair Services & Dynamic Ratings:** Public service listing with server-side pagination, search, category/mode filtering, and sorting (`/api/services`), plus single-service details (`/api/services/:id`) with recalculated average ratings, review counts, and customer avatar resolution from `User` records.
-- **📅 Booking & Status History Workflow:** Customers can submit repair requests (preventing duplicate active bookings on the same service), track status history (`requested` → `accepted` → `in-progress` → `completed` → `paid`, or `cancelled`/`rejected`), and cancel requested bookings.
-- **⭐ Verified Customer Reviews:** Paid bookings allow customers to submit ratings (1–5) and reviews, automatically recalculating service ratings and exposing public reviews (`/api/reviews`) with customer profile avatars.
-- **👑 Technician Management & Pro Plan:** Technicians can create, update, and delete repair services (subject to the free plan service limit) and upgrade to the **Pro Technician Plan** via Stripe Checkout or direct activation (`/api/subscriptions/pro/*`).
-- **🛡️ Admin Moderation & Support Inbox:** Admins can manage user roles, approve or reject technician services, inspect all bookings and payment records/revenues, and manage customer contact messages (`/api/contact`, `/api/admin/messages`).
+* **🔐 Authentication & Role-Based Access Control (RBAC):** Supports email/password signup and login with `bcryptjs` password hashing, Google OAuth token verification (`/api/auth/google`), JWT bearer token authentication, demo user lookup (`/api/auth/demo-users`), and role checks (`customer`, `technician`, `admin`).
+* **🛠️ Repair Services & Dynamic Ratings:** Public service catalog with server-side pagination, search, category/mode filtering, and sorting (`/api/services`), plus service details (`/api/services/:id`) with recalculated average ratings, review counts, and customer avatars resolved from `User` profiles.
+* **📅 Booking & Status History Workflow:** Customers can submit repair requests (with duplicate active-booking protection), cancel requested bookings, and track status progression (`requested` → `accepted` → `in-progress` → `completed` → `paid`, or `cancelled`/`rejected`).
+* **⭐ Verified Customer Reviews:** Paid bookings allow customers to submit ratings (1–5) and reviews, updating service rating statistics and exposing public reviews (`/api/reviews`) with customer avatars.
+* **👑 Technician Services & Pro Plan:** Technicians can create, update, and delete repair services (subject to free plan limits) and upgrade to the **Pro Technician Plan** via Stripe Checkout or direct activation (`/api/subscriptions/pro/*`).
+* **🛡️ Admin Moderation & Support Inbox:** Admins can manage user roles, approve or reject services, inspect bookings and payment revenues, and handle customer contact messages (`/api/contact`, `/api/admin/messages`).
+* **🌱 Database Seeding:** Includes seed data (`seed/fixmateSeedData.js`) and a seeding script (`scripts/seed.js`) to populate initial records.
 
 ---
 
 ## 📦 NPM Packages Used
 
-| Package        | Purpose                                                                   |
-| :------------- | :------------------------------------------------------------------------ |
-| `express`      | Web framework for building REST API routes and middlewares                |
-| `cors`         | Enables cross-origin requests with credentials for allowed client origins |
-| `dotenv`       | Loads environment variables from `.env`                                   |
-| `mongoose`     | MongoDB ODM for models, queries, and database connection                  |
-| `bcryptjs`     | Hashes and verifies user passwords securely                               |
-| `jsonwebtoken` | Generates and verifies JWT authentication tokens                          |
-| `stripe`       | Handles Stripe Checkout sessions and subscription/payment workflows       |
+| Package | Purpose |
+| :--- | :--- |
+| `express` | Web framework for building REST API routes and middlewares |
+| `cors` | Enables cross-origin requests with credentials for allowed client origins |
+| `dotenv` | Loads environment variables from `.env` |
+| `mongoose` | MongoDB ODM for models, queries, and database connection |
+| `bcryptjs` | Hashes and verifies user passwords securely |
+| `jsonwebtoken` | Generates and verifies JWT authentication tokens |
+| `stripe` | Handles Stripe Checkout sessions and subscription/payment workflows |
 
 ---
 
 ## 📁 Server Folder Structure
 
 ```text
-server/
+fixmate-platform-server/
 ├── config/
-│   └── db.js                 # MongoDB connection setup
+│   └── db.js                      # MongoDB connection configuration
 ├── models/
-│   ├── User.js               # User schema, roles & Pro plan fields
-│   ├── Service.js            # Repair service & rating schema
-│   ├── Booking.js            # Booking, status history, payment & review schema
-│   ├── Payment.js            # Booking & subscription payment records
-│   └── ContactMessage.js     # Customer contact messages schema
-├── .env.example              # Environment variable template
-├── index.js                  # Express server, middlewares & API routes
-└── package.json              # Dependencies & scripts
-```
+│   ├── Booking.js                   # Booking, status history, payment & review model
+│   ├── ContactMessage.js            # Customer contact messages model
+│   ├── Payment.js                   # Booking & subscription payment records model
+│   ├── Service.js                   # Repair service & rating model
+│   └── User.js                      # User schema, roles & Pro plan model
+├── scripts/
+│   └── seed.js                      # Database seed runner script
+├── seed/
+│   └── fixmateSeedData.js           # Seed dataset for FixMate platform
+├── .env                             # Environment variables (local)
+├── .gitignore
+├── index.js                         # Express server, middlewares & API routes
+├── package-lock.json
+├── package.json                     # Dependencies & scripts
+└── README.md
